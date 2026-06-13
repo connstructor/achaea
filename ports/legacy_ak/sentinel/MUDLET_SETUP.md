@@ -2,16 +2,13 @@
 
 `Sentinel.lua` self-registers **nothing** — no `tempAlias`, no `tempRegexTrigger`. You
 create those by hand in Mudlet. This doc lists every item to add. The system is small to
-wire: **one required trigger**, **four arm aliases**, and **one optional trigger** (only
-needed for the dismember route).
+wire: **one required trigger** and **two arm aliases**.
 
-- The **arm aliases** (`zz`/`xx`/`cc`/`vv`) pick the finisher and arm the system —
+- The **arm aliases** (`zz`/`xx`) pick the killpath and arm the system —
   `sentinel.arm_next_bal(...)`.
 - The **"Balance used" trigger** is **required** — it's the firing engine. It calls
   `sentinel.on_balance(...)`, which arms a just-in-time `tempTimer` that fires your attack
   the instant balance returns (see §1).
-- The **"skullbash lands" trigger** is **optional** — only the dismember route needs it, to
-  advance its SKULLBASH → RATTLE step (see §3).
 
 All regex below is in **Mudlet UI form** (single backslash). Don't double-escape. In Mudlet,
 `matches[1]` is the whole match and `matches[2]`, `matches[3]`, … are the capture groups.
@@ -25,9 +22,9 @@ All regex below is in **Mudlet UI form** (single backslash). Don't double-escape
 
 1. Add `Sentinel.lua` as a **Script** (Scripts → Add Item → paste the file). It defines the
    global `sentinel` table when the profile loads.
-2. Add the aliases and triggers below. They reference `sentinel.*`, which exists after the
+2. Add the aliases and trigger below. They reference `sentinel.*`, which exists after the
    script runs, so ordering within the profile doesn't matter at runtime.
-3. Make sure the host-framework globals the module reads are present — see §5.
+3. Make sure the host-framework globals the module reads are present — see §4.
 4. Set your weapon item IDs in `sentinel.CONFIG.WEAPONS` (`SPEAR`, `HANDAXE`, `SHIELD`).
 
 ---
@@ -67,54 +64,41 @@ Notes:
 
 ---
 
-## 2. Arm aliases (pick the finisher + arm)
+## 2. Arm aliases (pick the killpath + arm)
 
 Mudlet aliases are regex. Each press arms a single dispatch; it fires now if balance + eq are
 up, otherwise the §1 timer fires it on balance return.
 
-| Pattern | Script | Finisher |
+| Pattern | Script | Killpath |
 |---|---|---|
-| `^zz$` | `sentinel.arm_next_bal(false)` | **skullbash** (default) — break leg/leg/head, then SKULLBASH to death. |
-| `^xx$` | `sentinel.arm_next_bal(true)` | **wrench** — break BOTH legs (TRIP the first, axe the second), then IMPALE → WRENCH once impaled. |
-| `^cc$` | `sentinel.arm_next_bal("dismember")` | **dismember** — break BOTH legs (no head), then SKULLBASH → ENRAGE BUTTERFLY + ENSNARE → RATTLE → OUTR ROPE/TRUSS → IMPALE → DISMEMBER. |
-| `^vv$` | `sentinel.arm_next_bal("lock")` | **lock** — go for the truelock, not a limb kill: once impatience+asthma+weariness are up, TRIP one leg (off-herb-balance opener), then handaxe anorexia + slickness inside the 4s tempslickness window, then SKULLBASH the prone-locked target. Separate path — leaves zz/xx/cc untouched. |
+| `^zz$` | `sentinel.arm_next_bal(false)` | **skullbash** (default) — prep both legs + the head, then break leg/leg/head and SKULLBASH while they're prone with the head broken. |
+| `^xx$` | `sentinel.arm_next_bal(true)` | **wrench** — prep both legs, TRIP the first + axe the second, then IMPALE while prone and WRENCH once impaled. |
 
-The finisher you pick is a **preference**, not an engine latch: it persists until you press a
-different arm alias. So `cc` keeps driving dismember on every subsequent arm until you press
-`zz`/`xx` to switch back. Each step is still re-read from live state every dispatch.
+> **Venom on break hits.** Both killpaths share the prep + break engine and ride `VENOM_PRIO`
+> top-down, with two seals on the break hits: the **TRIP** break carries **SLIKE** (anorexia)
+> while they still lack anorexia, and the **second-leg axe** break carries **GECKO** (slickness)
+> while they still lack slickness. Once that seal is up the hit falls back to priority venom.
+> The head break and every prep hit always use priority venom.
 
-`zz`/`xx`/`cc`/`vv` are just default buttons — rename the patterns to whatever keys you bind. You
+The killpath you pick is a **preference**, not an engine latch: it persists until you press a
+different arm alias. So `xx` keeps driving wrench on every subsequent arm until you press `zz`
+to switch back. Each step is still re-read from live state every dispatch.
+
+`zz`/`xx` are just default buttons — rename the patterns to whatever keys you bind. You
 normally never call `sentinel.dispatch()` directly; go through an arm alias.
 
 ---
 
-## 3. OPTIONAL — "skullbash lands" trigger (dismember only)
-
-The dismember route's `SKULLBASH` → `ENSNARE` transition is the one step that isn't visible
-in target state (nothing in `affstrack`/`lb` reports the SKULLBASH landing). Wire your
-"your skullbash lands" game line to:
-
-```lua
-sentinel.on_skullbash()
-```
-
-This stamps a 10-second window (`sentinel.CONFIG.SKULLBASH_FLAG_SECONDS`) during which the
-dismember route knows the SKULLBASH connected and advances to ENRAGE BUTTERFLY + ENSNARE.
-**Not needed** for the skullbash, wrench, or lock routes; harmless to add regardless. Match
-the pattern to your real skullbash-landed line.
-
----
-
-## 4. Optional convenience aliases
+## 3. Optional convenience aliases
 
 | Pattern | Script | What it does |
 |---|---|---|
-| `^sentstatus$` | `sentstatus()` | Read-only status: finisher, limb prep bars, per-route readiness, conditions. |
-| `^sentreset$` | `sentreset()` | Teardown — resets the finisher to skullbash and clears state. Use when a fight ends. |
+| `^sentstatus$` | `sentstatus()` | Read-only status: killpath, limb prep bars, per-route readiness, conditions. |
+| `^sentreset$` | `sentreset()` | Teardown — resets the killpath to skullbash and clears state. Use when a fight ends. |
 
 ---
 
-## 5. Prerequisites — host-framework globals (not configured here)
+## 4. Prerequisites — host-framework globals (not configured here)
 
 The module is pure offense logic; it **reads** opponent/self state from the Legacy + AK
 framework. These are populated by that framework's own triggers/GMCP, **not** by anything in
@@ -124,7 +108,7 @@ this doc. If they're missing, the system runs on zeros. The module needs:
 |---|---|
 | `Legacy.Curing.Affs` | self afflictions (`aeon` gate) |
 | `Legacy.Settings.Curing.status` | combat-paused gate |
-| `Legacy[<name>].morph` | current morph form (Jaguar/Basilisk) |
+| `Legacy[<name>].morph` | current morph form (kept in `Jaguar` via a free MORPH precommand) |
 | `ak.defs` | opponent shield / rebounding |
 | `affstrack` | opponent afflictions — `affstrack.score[aff]` (0-100), `affstrack.impale` |
 | `lb[target].hits[limb]` | opponent limb damage (0-200) |
@@ -141,8 +125,5 @@ this doc. If they're missing, the system runs on zeros. The module needs:
 - [ ] **"Balance used" trigger** → `sentinel.on_balance(tonumber(matches[2]))` — REQUIRED
 - [ ] `zz` alias → `sentinel.arm_next_bal(false)` (skullbash)
 - [ ] `xx` alias → `sentinel.arm_next_bal(true)` (wrench)
-- [ ] `cc` alias → `sentinel.arm_next_bal("dismember")` (dismember)
-- [ ] `vv` alias → `sentinel.arm_next_bal("lock")` (lock — single-leg truelock)
-- [ ] *(dismember only)* "skullbash lands" trigger → `sentinel.on_skullbash()`
 - [ ] *(optional)* `sentstatus` / `sentreset` aliases
-- [ ] Host-framework globals present (§5): `Legacy`, `ak`, `affstrack`, `lb`, `target`, `targetparry`, `boxEcho`, `gmcp`
+- [ ] Host-framework globals present (§4): `Legacy`, `ak`, `affstrack`, `lb`, `target`, `targetparry`, `boxEcho`, `gmcp`

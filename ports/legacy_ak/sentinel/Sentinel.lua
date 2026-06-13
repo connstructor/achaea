@@ -3,48 +3,33 @@
 ------------------------------------------
 -- Sentinel combat module by Tannivh and Kiryn.
 --
--- One stateless dispatch, three selectable finishers. Every dispatch rebuilds
--- the command set from CURRENT target state (limb damage + afflictions); nothing
--- is latched. The only "memory" is sentinel.state.finisher -- a plain preference
--- set by the arm aliases (zz/xx/cc) and READ (never written) by the engine.
+-- One stateless dispatch, two selectable killpaths. Every dispatch rebuilds the command
+-- set from CURRENT target state (limb damage + afflictions); nothing is latched. The only
+-- "memory" is sentinel.state.finisher -- a plain preference set by the arm aliases (zz/xx)
+-- and READ (never written) by the engine.
 --
---   * skullbash (default, zz): prep both legs + the head, then break leg/leg/head
---     and SKULLBASH to death while they're prone with the head broken. The leg breaks
---     only exist to put them down -- once the kill window (prone + broken head) is
---     open, leg state is ignored; only standing or a healed head closes it.
---   * wrench    (xx):          break BOTH legs (TRIP the first, axe the second), then
---                              IMPALE and WRENCH once impaled.
---   * dismember (cc):          break BOTH legs (no head), then a fixed chain read from
---                              state -- SKULLBASH -> ENRAGE BUTTERFLY (clears OUR
---                              blindness) + ENSNARE (transfix) -> RATTLE (knockout) ->
---                              OUTR ROPE/TRUSS (bind) -> IMPALE -> DISMEMBER
---                              (MORPH JAGUAR first if needed).
---   * lock      (vv):          go for the lock, not a limb kill. Once imp+ast+wear are up:
---                              TRIP one leg (off-herb-balance opener) + handaxe anorexia +
---                              slickness inside the 4s tempslickness window, then SKULLBASH
---                              the prone-locked target. A separate path -- leaves zz/xx/cc
---                              and their break invariants untouched.
+--   * skullbash (default, zz): prep both legs + the head, then break leg/leg/head and
+--     SKULLBASH to death while they're prone with the head broken. The leg breaks only
+--     exist to put them down -- once the kill window (prone + broken head) is open, leg
+--     state is ignored; only standing or a healed head closes it.
+--   * wrench    (xx):          prep both legs, TRIP the first (breaking it + proning them),
+--     axe the second, then IMPALE while prone and WRENCH once impaled.
 --
--- PETRIFY (>=5 mental affs, unblind, via a Basilisk precommand) -> EXTIRPATE, and a
--- prone-lock SKULLBASH, fire opportunistically under any finisher.
+-- Both killpaths prep + break from one shared engine. A free ENRAGE (shield-strip / aff)
+-- and a MORPH-to-default precommand ride on every dispatch.
 --
--- WHY THIS IS STATELESS: every finisher preps + breaks legs from one shared engine, then
--- diverges -- skullbash also breaks the head; wrench and dismember stop at both legs. At and
--- after the divergence every step is read from live target state -- transfixed / unconscious /
--- trussed / impaled / petrified (affstrack) and limb damage (lb) -- so the engine never needs
--- a self-continuing "mode" or progress counter. The chosen finisher is the single bit that
--- says which way to diverge, and it's a user preference, not an engine latch.
+-- VENOM RULES (the only special-casing): a break hit seals the lock when it can, otherwise
+-- it rides VENOM_PRIO top-down.
+--   * the TRIP break          -> SLIKE (anorexia) while they still lack anorexia, else priority.
+--   * the second-leg axe break -> GECKO (slickness) while they still lack slickness, else priority.
+--   * the head break, and every prep hit -> priority venom (VENOM_PRIO).
 --
--- THE ONE EXCEPTION -- sentinel.on_skullbash():
--- In the dismember chain the SKULLBASH -> ENRAGE/ENSNARE step is the only transition not
--- visible in target state: the target stays prone with both legs broken and not yet
--- transfixed across both the SKULLBASH dispatch and the ENSNARE dispatch, and nothing in
--- affstrack/lb reports that the SKULLBASH connected, so two consecutive dispatches look
--- identical. There is no marker to read, so we self-signal: wire your "your skullbash lands"
--- trigger to sentinel.on_skullbash(), which stamps state.skullbash_at. It is read at exactly
--- one place (skullbash_landed()), is cleared on target change / reset, and never touches the
--- finisher. If AK ever starts tracking it, repoint skullbash_landed() at that and delete
--- on_skullbash().
+-- WHY THIS IS STATELESS: both killpaths prep + break legs from one shared engine, then
+-- diverge -- skullbash also breaks the head and SKULLBASHes; wrench stops at both legs,
+-- impales, and wrenches. Every step is read from live target state (prone / impaled via
+-- affstrack, limb damage via lb), so the engine never needs a self-continuing "mode" or
+-- progress counter. The chosen killpath is the single bit that says which way to diverge,
+-- and it's a user preference, not an engine latch.
 ------------------------------------------
 -- Required globals (host frameworks -- Legacy curing + AK; not provided here)
 ------------------------------------------
@@ -60,21 +45,14 @@
 -- MUDLET_SETUP.md in this folder):
 --   * Alias  "^zz$"   ->  sentinel.arm_next_bal(false)         -- skullbash (default)
 --   * Alias  "^xx$"   ->  sentinel.arm_next_bal(true)          -- wrench
---   * Alias  "^cc$"   ->  sentinel.arm_next_bal("dismember")   -- dismember
---   * Alias  "^vv$"   ->  sentinel.arm_next_bal("lock")        -- lock (single-leg truelock)
 --   * Regex trigger  "^Balance used: (\d+\.\d+)s\.$"
 --                     ->  sentinel.on_balance(tonumber(matches[2]))
---   * Regex trigger  (your "SKULLBASH lands" line -- only needed for dismember)
---                     ->  sentinel.on_skullbash()
 --   * (optional)  "^sentstatus$" -> sentstatus()  /  "^sentreset$" -> sentreset()
 ------------------------------------------
 sentinel = sentinel or {}
 
 -- One source of truth per priority: the affliction, the ability that lands it, and
--- (optionally) a confidence threshold to count it as already landed, plus (optionally) a
--- `requires` list of affs that must be up before the entry is worth selecting (coupling
--- -- e.g. anorexia waits on slickness + impatience). How much each attack adds to a limb
--- is used to decide when one more hit breaks it.
+-- (optionally) a confidence threshold to count it as already up.
 sentinel.CONFIG =
 {
   DEFAULT_AFF_THRESHOLD = 50,
@@ -98,23 +76,19 @@ sentinel.CONFIG =
     { aff = "nausea",         enrage = "BADGER" },
     { aff = "hallucinations", enrage = "WOLF" },
   },
-  -- Lock-driving order. PARALYSIS #1 (tempo/bait: forces a bloodroot eat, threatens tree).
-  -- MENTALS RIDE HIGH -- stupidity especially: mental affs degrade their curing across the
-  -- board, so softening the cure response early makes every seal stick harder. Stupidity also
-  -- goldenseal-stacks with impatience (protecting it); recklessness/dizziness feed PETRIFY.
-  -- Kelp deepeners (clumsiness/sensitivity) drop below the keystone to make room. Slickness
-  -- mostly arrives free as tempslickness on a break. Impatience rides DOUBLESTRIKE in ATK_PRIO.
+  -- Venom priority. Break hits override this with SLIKE/GECKO to seal the lock (see header);
+  -- everything else (prep + the head break) rides this list top-down.
   VENOM_PRIO =
   {
     { aff = "paralysis",    venom = "CURARE" },     -- #1: tempo/bait, hardens every cure + tree
-    { aff = "asthma",       venom = "KALMIA" },     -- kelp seal (blocks smoking): the foundation
-    { aff = "anorexia",     venom = "SLIKE", },
-    { aff = "slickness",    venom = "GECKO" },      -- apply-block; mostly arrives free as tempslickness on a break
-    { aff = "weariness",    venom = "VERNALIUS" },  -- kelp depth + class blocker (Fitness)
-    { aff = "stupidity",    venom = "ACONITE" },    -- mental cure-disruptor (ESP.) + goldenseal depth -> protects impatience
-    { aff = "recklessness", venom = "EURYPTERIA" }, -- mental: lowers their cure chances + PETRIFY
-    { aff = "dizziness",    venom = "LARKSPUR" },   -- mental + goldenseal depth + PETRIFY
     { aff = "clumsiness",   venom = "XENTIO" },     -- kelp depth: keeps asthma/weariness >=67 through a cure
+    { aff = "asthma",       venom = "KALMIA" },     -- kelp seal (blocks smoking): the foundation
+    { aff = "anorexia",     venom = "SLIKE" },      -- eat-block; also forced by the TRIP break
+    { aff = "slickness",    venom = "GECKO" },      -- apply-block; also forced by the second-leg axe break
+    { aff = "weariness",    venom = "VERNALIUS" },  -- kelp depth + class blocker (Fitness)
+    { aff = "stupidity",    venom = "ACONITE" },    -- mental cure-disruptor + goldenseal depth
+    { aff = "dizziness",    venom = "LARKSPUR" },   -- mental + goldenseal depth
+    { aff = "recklessness", venom = "EURYPTERIA" }, -- mental: lowers their cure chances
     { aff = "sensitivity",  venom = "PREFARAR" },   -- kelp depth (+ damage amp)
     -- Off-plan / situational tail.
     { aff = "darkshade",    venom = "DARKSHADE" },
@@ -133,63 +107,24 @@ sentinel.CONFIG =
     TRIP = 14.7,
     THROW = 14.7,
   },
-  -- Morphs. Default form for spear combat; Basilisk only to land a PETRIFY.
+  -- Default spear-combat morph (kept in form via a free MORPH precommand).
   DEFAULT_MORPH = "Jaguar",
-  PETRIFY_MORPH = "Basilisk",
-  -- Dismember finish (cc). DISMEMBER needs both legs broken, so the route breaks BOTH
-  -- legs (no head) first, then walks this chain, one balance action per dispatch, each
-  -- step read from state:
-  --   ... break both legs -> SKULLBASH -> ENRAGE BUTTERFLY + ENSNARE (transfix) ->
-  --   RATTLE (knockout) -> OUTR ROPE/TRUSS (bind) -> IMPALE -> DISMEMBER (MORPH JAGUAR
-  --   first if not already in form). %s = target -- adjust exact syntax here. Match aff
-  --   names to your affstrack keys. (SKULLBASH has no AK tracker -- on_skullbash() signals
-  --   its landing, the cue to advance from SKULLBASH to ENSNARE.)
-  DISMEMBER =
-  {
-    ENRAGE = "ENRAGE BUTTERFLY",  -- free; clears OUR blindness so DISMEMBER lands
-    ENSNARE = "ENSNARE %s",       -- transfix
-    SKULLBASH = "SKULLBASH %s",   -- no AK tracker; on_skullbash() signals it landed
-    RATTLE = "RATTLE %s",         -- knock unconscious
-    TRUSS = "OUTR ROPE/TRUSS %s", -- get rope from rift, then TRUSS (slash-split)
-    IMPALE = "IMPALE %s",
-    MORPH = "Jaguar",
-    KILL = "DISMEMBER %s",
-  },
-  -- skullbash_landed() window (seconds): how long after on_skullbash() the dismember
-  -- route treats its SKULLBASH as having connected (advance to RATTLE).
-  SKULLBASH_FLAG_SECONDS = 10,
   -- Echo debounce window (seconds) for the debug echo.
   ECHO_DEBOUNCE = 0.3,
-  -- Lag reduction: on_balance arms a timer for (interval - PREARM_INTERVAL); the
-  -- arm alias sets next_bal_armed so it actually fires. nil uses getNetworkLatency().
+  -- Lag reduction: on_balance arms a timer for (interval - PREARM_INTERVAL); the arm alias
+  -- sets next_bal_armed so it actually fires. nil uses getNetworkLatency().
   PREARM_INTERVAL = nil,
 }
 
--- A full lock (all up = they can't cure). Prone + locked -> opportunistic SKULLBASH.
--- This is the weariness truelock: asthma/slickness/paralysis/impatience/anorexia, with
--- weariness as the class passive-blocker. Per-class blockers (voyria vs Apostate/Priest,
--- haemophilia vs Magi/Sylvan, stupidity vs Alchemist, ...) are a v2 item.
--- PETRIFY needs the target unblind with >=5 of the mental affs in PETRIFY_AFFS.
-sentinel.DATA =
-{
-  LOCK_AFFS =
-  { "impatience", "asthma", "weariness", "paralysis", "slickness", "anorexia" },
-  PETRIFY_AFFS =
-  { "hallucinations", "dizziness", "recklessness", "confusion", "paranoia", "epilepsy", "impatience" },
-}
-
--- Minimal runtime state. finisher is a user preference (set ONLY by arm_next_bal);
--- the rest is lag-reduction bookkeeping, the isolated skullbash-landed signal, target
--- tracking, and the echo-debounce stamp. No engine-written route latch lives here --
--- e.g. the wrench "both legs have been broken" milestone is INFERRED from limb state,
--- never stored (see both_legs_were_broken).
+-- Minimal runtime state. finisher is a user preference (set ONLY by arm_next_bal); the rest
+-- is lag-reduction bookkeeping and the echo-debounce stamp. No engine-written route latch
+-- lives here -- e.g. the wrench "both legs have been broken" milestone is INFERRED from limb
+-- state, never stored (see both_legs_were_broken).
 sentinel.state =
 {
   finisher = "skullbash",
   next_bal_timer = nil,
   next_bal_armed = false,
-  skullbash_at = nil,
-  last_target = nil,
   last_echo_at = nil,
 }
 
@@ -304,37 +239,6 @@ local function shield_count()
 end
 
 ------------------------------------------
--- Lock / petrify state
-------------------------------------------
-
-local function all_above(affs, threshold)
-  for _, aff in ipairs(affs) do
-    if score(aff) < threshold then
-      return false
-    end
-  end
-  return true
-end
-
-local function is_locked()
-  return all_above(sentinel.DATA.LOCK_AFFS, CONFIG.LOCK_PREP_THRESHOLD)
-end
-
-local function petrify_aff_count()
-  local n = 0
-  for _, aff in ipairs(sentinel.DATA.PETRIFY_AFFS) do
-    if has_aff(aff) then
-      n = n + 1
-    end
-  end
-  return n
-end
-
-local function can_petrify()
-  return not has_aff("petrified") and not has_aff("blind") and petrify_aff_count() >= 5
-end
-
-------------------------------------------
 -- Limb damage / targeting
 ------------------------------------------
 
@@ -412,15 +316,10 @@ end
 ------------------------------------------
 -- Affliction selection
 ------------------------------------------
--- Returns the chosen prio entry (with its .atk/.enrage/.venom field).
+-- Returns the chosen prio entry (with its .atk/.enrage/.venom field). An entry with a
+-- `requires` list is only selectable once those affs are up (>= LOCK_PREP_THRESHOLD); no
+-- current entry uses it, but the mechanism stays for coupling future keystones.
 
--- An entry is selectable only if its coupling prerequisites are all up. This is how the
--- keystone is sequenced: anorexia carries requires = {"slickness", "impatience"}, so we
--- don't throw it (and watch it get epidermal'd / focused straight back off) until both of
--- its cures are already blocked. Entries with no `requires` field are always selectable.
--- Prereqs are checked at the LOCK bar, not the default: under affstrack's ambiguity decay a
--- seal sitting at 50 is a coin flip, and that's exactly when we must NOT sink anorexia into
--- a maybe-open cure -- so demand the seal be genuinely up (>= LOCK_PREP_THRESHOLD).
 local function requires_met(entry)
   if not entry.requires then
     return true
@@ -454,12 +353,10 @@ local function select_aff(prio_list, exclude)
   return min_entry or prio_list[1]
 end
 
--- The lock base: impatience (focus blocked) + asthma (smoke blocked) + weariness (passive
--- blocked). The vv lock path keys off it. Every finisher (lock or limb) selects venoms from the
--- same VENOM_PRIO -- the lock-driving set hinders any target and keeps the affs warm for an
--- opportunistic switch to vv. The only lock-specific venom logic lives in lock_step.
-local function lock_base_ready()
-  return has_aff("impatience") and has_aff("asthma") and has_aff("weariness")
+-- The next lacked VENOM_PRIO aff's venom -- used by prep and the head break. Break hits
+-- override this with SLIKE/GECKO while those seals are still open (see next_leg_break).
+local function priority_venom(exclude)
+  return select_aff(CONFIG.VENOM_PRIO, exclude).venom
 end
 
 ------------------------------------------
@@ -485,16 +382,10 @@ local function current_morph()
   return name and Legacy and Legacy[name] and Legacy[name].morph or nil
 end
 
+-- Stay in the default spear-combat form (free precommand; needs bal/eq but doesn't spend it).
 local function select_morph()
-  -- Petrified: the execute is WIELD SPEAR + EXTIRPATE as a humanoid, so don't morph.
-  if has_aff("petrified") then
-    return nil
-  end
-  -- Basilisk only to set up a PETRIFY (requires balance but doesn't consume it, so it
-  -- rides as a precommand); otherwise the default spear-combat form.
-  local intended = can_petrify() and CONFIG.PETRIFY_MORPH or CONFIG.DEFAULT_MORPH
-  if current_morph() ~= intended then
-    return "MORPH " .. intended:upper()
+  if current_morph() ~= CONFIG.DEFAULT_MORPH then
+    return "MORPH " .. CONFIG.DEFAULT_MORPH:upper()
   end
   return nil
 end
@@ -517,13 +408,8 @@ local function axe_attack(limb, venom)
   }
 end
 
--- Petrified execute: we petrified as a Basilisk, so re-wield the spear and EXTIRPATE.
-local function petrify_execute()
-  return { string.format("WIELD %s %s", SPEAR, SHIELD), string.format("EXTIRPATE %s", target) }
-end
-
 ------------------------------------------
--- Shared break engine (used by all three finishers: skullbash, wrench, dismember)
+-- Break engine (shared by both killpaths)
 ------------------------------------------
 
 local function both_legs_broken()
@@ -553,40 +439,49 @@ local function both_legs_prepped()
   return true
 end
 
--- Break the next leg toward a both-legs-broken prone: if they're up, trip a prepped,
--- unparried leg (breaks it and drops them); once down, axe whichever leg still stands
--- (prone bypasses parry). nil when nothing is breakable right now -- the caller then
--- falls back to the prep engine to rebuild.
-local function next_leg_break(venom)
+-- Break the next leg toward both-legs-broken-and-prone. Standing -> TRIP a prepped, unparried
+-- leg (breaks it + drops them), sealing anorexia with SLIKE while they still lack it. Down ->
+-- axe whichever leg still stands (prone bypasses parry), sealing slickness with GECKO while
+-- they still lack it. Either seal falls back to priority venom once that aff is up. nil when
+-- nothing is breakable right now -- the caller then falls back to the prep engine to rebuild.
+local function next_leg_break(exclude)
   if not is_prone() then
     local leg = prepped_leg()
-    return leg and trip_attack(leg, venom) or nil
+    if not leg then
+      return nil
+    end
+    local venom = (not has_aff("anorexia")) and "SLIKE" or priority_venom(exclude)
+    return trip_attack(leg, venom)
   end
   for _, limb in ipairs(CONFIG.LIMB_PRIO) do
     if limb:match(" leg$") and not is_limb_broken(limb) then
-      return is_limb_prepped(limb, "THROW") and axe_attack(limb, venom) or nil
+      if not is_limb_prepped(limb, "THROW") then
+        return nil
+      end
+      local venom = (not has_aff("slickness")) and "GECKO" or priority_venom(exclude)
+      return axe_attack(limb, venom)
     end
   end
   return nil
 end
 
--- Trip one leg, axe the other, axe the head. Returns the next break command, or nil
--- once both legs AND the head are broken (caller proceeds to its kill). nil mid-break
--- means nothing is breakable right now -> caller falls back to the prep engine.
-local function break_legs_and_head(venom)
+-- Trip a leg, axe the other, axe the head (priority venom on the head). Returns the next break
+-- command, or nil once both legs AND the head are broken (caller proceeds to its kill). nil
+-- mid-break means nothing is breakable right now -> caller falls back to the prep engine.
+local function break_legs_and_head(exclude)
   if not both_legs_broken() then
-    return next_leg_break(venom)
+    return next_leg_break(exclude)
   end
   if not is_limb_broken("head") then
-    return axe_attack("head", venom)
+    return axe_attack("head", priority_venom(exclude))
   end
   return nil
 end
 
 ------------------------------------------
--- Prep engine (shared by all finishers -- they prep identically, then diverge)
+-- Prep engine (shared; both killpaths prep identically, then diverge)
 ------------------------------------------
--- Build the next limb and stack affs/venoms. Breaking is the finisher's job.
+-- Build the next limb and stack affs/venoms. Breaking is the killpath's job.
 
 local function select_prep_commands(exclude)
   -- Two shields up: strip them with RIVESTRIKE.
@@ -600,7 +495,7 @@ local function select_prep_commands(exclude)
     atk_entry = select_aff(CONFIG.ATK_PRIO, exclude)
     table.insert(venom_exclude, atk_entry.aff)
   end
-  local venom = select_aff(CONFIG.VENOM_PRIO, venom_exclude).venom
+  local venom = priority_venom(venom_exclude)
   local attack = force_rivestrike and "RIVESTRIKE" or atk_entry.atk
   local limb = select_limb(attack)
   if limb then
@@ -610,57 +505,29 @@ local function select_prep_commands(exclude)
 end
 
 ------------------------------------------
--- Dismember state reads
+-- Killpath step-selectors (each returns a command list, or nil to fall through to the
+-- shared prep engine). All read live state only; none write state.finisher.
 ------------------------------------------
 
--- Read a dismember marker from current state: afflictions, plus the prone/impaled
--- accessors. "unconscious" checks both affstrack keys RATTLE might land.
-local function dismember_marker(aff)
-  if aff == "prone" then
-    return is_prone()
-  end
-  if aff == "impaled" then
-    return is_impaled()
-  end
-  if aff == "unconscious" then
-    return has_aff("unconsciousness") or has_aff("asleep")
-  end
-  return has_aff(aff)
-end
-
--- The ONE out-of-band signal (see header). True for SKULLBASH_FLAG_SECONDS after
--- sentinel.on_skullbash() fires -- our cue that the chain's SKULLBASH connected
--- (nothing in affstrack/lb tracks it), so the route advances from SKULLBASH to RATTLE.
-local function skullbash_landed()
-  local at = sentinel.state.skullbash_at
-  return at ~= nil and (getEpoch() - at) <= CONFIG.SKULLBASH_FLAG_SECONDS
-end
-
-------------------------------------------
--- Finisher step-selectors (each returns a command list, or nil to fall through to
--- the shared prep engine). All read live state only; none write state.finisher.
-------------------------------------------
-
--- skullbash: break leg/leg/head, then SKULLBASH while they're prone with the head
--- broken. The kill window is prone + broken head ONLY -- the leg breaks just put them
--- down, so legs healing mid-bash must never pull us back into the break engine. Only
--- standing up or a healed head closes the window (back to breaking/prepping).
+-- skullbash: break leg/leg/head, then SKULLBASH while they're prone with the head broken. The
+-- kill window is prone + broken head ONLY -- the leg breaks just put them down, so legs healing
+-- mid-bash must never pull us back into the break engine. Only standing up or a healed head
+-- closes the window (back to breaking/prepping).
 local function skullbash_step(exclude)
   if is_limb_broken("head") and is_prone() then
     return { string.format("SKULLBASH %s", target) }
   end
-  local venom = select_aff(CONFIG.VENOM_PRIO, exclude).venom
-  return break_legs_and_head(venom)
+  return break_legs_and_head(exclude)
 end
 
--- "Both legs have BEEN broken" -- the wrench milestone -- inferred from current state,
--- no latch. True when both are broken now, OR exactly one is broken while the other
--- isn't even prepped. The requirement is "break both legs," not "keep both broken," so
--- a leg that heals after the second break must not regress us. We can read that from
--- state alone because of the break invariant: we never trip the first leg until BOTH
--- are prepped (the gate in wrench_step), and we axe the second the instant the first
--- goes down -- so a broken leg sitting beside an un-prepped one can only mean the other
--- was broken too and has since healed past its prep. (Other still prepped = mid-break.)
+-- "Both legs have BEEN broken" -- the wrench milestone -- inferred from current state, no
+-- latch. True when both are broken now, OR exactly one is broken while the other isn't even
+-- prepped. The requirement is "break both legs," not "keep both broken," so a leg that heals
+-- after the second break must not regress us. We can read that from state alone because of the
+-- break invariant: we never trip the first leg until BOTH are prepped, and we axe the second
+-- the instant the first goes down -- so a broken leg sitting beside an un-prepped one can only
+-- mean the other was broken too and has since healed past its prep. (Other still prepped =
+-- mid-break.)
 local function both_legs_were_broken()
   if both_legs_broken() then
     return true
@@ -674,142 +541,47 @@ local function both_legs_were_broken()
   return false
 end
 
--- wrench setup: break BOTH legs (next_leg_break TRIPs the first -- breaking it and
--- proning the target -- then axes the second), then IMPALE. The break only STARTS once
--- both legs are prepped (or we're already mid-break), which is the invariant that lets
--- both_legs_were_broken read the milestone from state. nil during prep -> shared prep
--- engine builds the legs. The actual WRENCH fires from the universal "impaled" branch.
+-- wrench setup: break BOTH legs (next_leg_break TRIPs the first -- breaking it and proning the
+-- target -- then axes the second), then IMPALE. The break only STARTS once both legs are
+-- prepped (or we're already mid-break), which is the invariant that lets both_legs_were_broken
+-- read the milestone from state. nil during prep -> shared prep engine builds the legs. The
+-- actual WRENCH fires from the universal "impaled" branch.
 local function wrench_step(exclude)
   if both_legs_were_broken() then
     return { string.format("IMPALE %s", target) }
   end
   if any_leg_broken() or both_legs_prepped() then
-    return next_leg_break(select_aff(CONFIG.VENOM_PRIO, exclude).venom)
-  end
-  return nil
-end
-
--- dismember: the committed chain, every step chosen purely from current state
--- (highest reached state first, so the latest-reached step wins). nil during the
--- break phase means nothing is breakable now -> fall through to the prep engine.
-local function dismember_step()
-  local D = CONFIG.DISMEMBER
-  if has_aff("petrified") then
-    return petrify_execute()
-  end
-  if is_impaled() then
-    local cmds = {}
-    if current_morph() ~= D.MORPH then
-      table.insert(cmds, "MORPH " .. D.MORPH:upper())
-    end
-    table.insert(cmds, string.format(D.KILL, target))
-    return cmds
-  end
-  if dismember_marker("trussed") then -- TRUSS landed -> IMPALE.
-    return { string.format(D.IMPALE, target) }
-  end
-  if dismember_marker("unconscious") then -- RATTLE landed -> OUTR ROPE/TRUSS to bind.
-    return { string.format(D.TRUSS, target) }
-  end
-  if dismember_marker("transfixed") then -- ENSNARE landed (transfixed) -> RATTLE (knockout).
-    return { string.format(D.RATTLE, target) }
-  end
-  -- Both legs broken (no head): SKULLBASH first. Nothing tracks its landing, so
-  -- on_skullbash() (skullbash_landed) is our cue to advance to ENRAGE BUTTERFLY (free,
-  -- clears our blindness) + ENSNARE (transfix).
-  if both_legs_broken() then
-    if skullbash_landed() then
-      return { D.ENRAGE, string.format(D.ENSNARE, target) }
-    end
-    return { string.format(D.SKULLBASH, target) }
-  end
-  -- Break phase -- break BOTH legs only (trip the first, axe the second), like wrench;
-  -- no head. nil during prep -> shared prep engine builds the legs first.
-  if any_leg_broken() or both_legs_prepped() then
-    return next_leg_break(select_aff(CONFIG.VENOM_PRIO, {}).venom)
+    return next_leg_break(exclude)
   end
   return nil
 end
 
 ------------------------------------------
--- lock (vv): single-leg break + truelock path, isolated from the limb finishers
-------------------------------------------
--- vv goes for the lock instead of a limb kill. Once the base (imp+ast+wear) is up:
---   1. TRIP one prepped leg (prone + a 4s tempslickness window). The trip rides the normal
---      venom priority -- paralysis #1 if not up, else the next herb-cured aff -- to keep them
---      burning herb balance, so the keystone lands while their eat is committed.
---   2. Inside that window the HANDAXE lands the keystone then the seal: anorexia (sealed by
---      tempslickness + the base's impatience), then slickness. One break's 4s tempslickness
---      covers both (anorexia ~t+2.2, slickness ~t+3.6), so there is no second break.
--- Then the opportunistic prone+lock SKULLBASH finishes. It never preps all three or breaks a
--- second leg, so the skullbash/wrench/dismember invariants are never touched. nil -> the shared
--- prep engine builds the base (and paralysis/mentals) first.
--- ("head" is just the venom-delivery target for the handaxe -- it won't break unless prepped;
--- change it if you'd rather sink the throws elsewhere.)
-local function lock_step(exclude)
-  if not lock_base_ready() then
-    return nil
-  end
-  -- 1. TRIP a prepped leg with the normal-priority venom (off-herb-balance opener).
-  if not is_prone() and not any_leg_broken() and prepped_leg() then
-    return trip_attack(prepped_leg(), select_aff(CONFIG.VENOM_PRIO, exclude).venom)
-  end
-  -- 2. Inside the trip's tempslickness window: handaxe the keystone, then the seal.
-  if is_prone() then
-    if has_aff("tempslickness") and not has_aff("anorexia") then
-      return axe_attack("head", "SLIKE") -- handaxe + anorexia (tempslickness + impatience seal it)
-    end
-    if has_aff("anorexia") and not has_aff("slickness") then
-      return axe_attack("head", "GECKO") -- handaxe + slickness, solidify the apply-block
-    end
-  end
-  return nil
-end
-
-------------------------------------------
--- Non-dismember routing (priority order; dismember is dispatched separately so its
--- self-supplied free actions aren't doubled -- see sentinel.dispatch).
+-- Routing
 ------------------------------------------
 
 local function select_commands(exclude)
   local finisher = sentinel.state.finisher or "skullbash"
-  -- Petrified -> EXTIRPATE, regardless of route.
-  if has_aff("petrified") then
-    return petrify_execute()
-  end
-  -- Impaled -> WRENCH. (Dismember owns the impaled state itself -- impale ->
-  -- DISMEMBER -- and never reaches here, so it's never hijacked.)
+  -- Impaled -> WRENCH (the wrench kill; skullbash never impales).
   if is_impaled() then
-    return { string.format("WRENCH %s %s", target, select_aff(CONFIG.VENOM_PRIO, exclude).venom) }
+    return { string.format("WRENCH %s", target) }
   end
   if finisher == "wrench" then
     local w = wrench_step(exclude)
     if w then
       return w
     end
-  elseif finisher == "skullbash" then
-    -- Enter the committed break once all three limbs are prepped, and stay in it
-    -- while any limb is broken. skullbash_step returns nil when the kill window
-    -- (prone + broken head) is closed and nothing is breakable -> fall through to
-    -- the prep engine to rebuild.
+  else
+    -- skullbash (default). Enter the committed break once all three limbs are prepped, and
+    -- stay in it while any limb is broken. skullbash_step returns nil when the kill window
+    -- (prone + broken head) is closed and nothing is breakable -> fall through to the prep
+    -- engine to rebuild.
     if any_limb_broken() or (all_limbs_prepped("TRIP") and prepped_leg()) then
       local s = skullbash_step(exclude)
       if s then
         return s
       end
     end
-  elseif finisher == "lock" then
-    local l = lock_step(exclude)
-    if l then
-      return l
-    end
-  end
-  -- Opportunistic finishers (any route): prone + fully locked -> SKULLBASH.
-  if is_prone() and is_locked() then
-    return { string.format("SKULLBASH %s", target) }
-  end
-  if can_petrify() then
-    return { string.format("PETRIFY %s", target) }
   end
   -- Otherwise build the next limb / stack affs.
   return select_prep_commands(exclude)
@@ -843,13 +615,6 @@ function sentinel.dispatch()
   if Legacy and Legacy.Settings and Legacy.Settings.Curing and Legacy.Settings.Curing.status == false then
     return
   end
-  -- Target change: clear the isolated skullbash-landed signal so a bash that landed
-  -- on the previous target can't advance a fresh dismember chain. The finisher
-  -- preference intentionally persists across a target swap.
-  if sentinel.state.last_target ~= target then
-    sentinel.state.last_target = target
-    sentinel.state.skullbash_at = nil
-  end
 
   local finisher = sentinel.state.finisher or "skullbash"
 
@@ -857,40 +622,27 @@ function sentinel.dispatch()
       xpcall(
         function()
           local out = {}
-          -- Spear loadout for the spear attacks; the petrified execute re-wields
-          -- itself (we petrified as a Basilisk), so skip the preamble wield then.
-          if not has_aff("petrified") then
-            table.insert(out, string.format("WIELD %s %s", SPEAR, SHIELD))
-            table.insert(out, string.format("WIPE %s", SPEAR))
-          end
+          -- Spear loadout for the spear attacks.
+          table.insert(out, string.format("WIELD %s %s", SPEAR, SHIELD))
+          table.insert(out, string.format("WIPE %s", SPEAR))
           table.insert(out, string.format("ORDER LOYALS KILL %s", target))
 
-          -- The dismember chain supplies its own free actions (ENRAGE BUTTERFLY to
-          -- clear our blindness, MORPH JAGUAR before the kill), so when it has a
-          -- committed step this dispatch, use it and skip the generic enrage/morph.
-          -- Otherwise (any other finisher, or dismember still in shared prep) run the
-          -- generic path: opportunistic enrage + morph, then the routing tree.
-          local dis = finisher == "dismember" and dismember_step() or nil
-          if dis and #dis > 0 then
-            for _, cmd in ipairs(dis) do
-              table.insert(out, cmd)
-            end
-          else
-            local enrage_cmd, enrage_aff = select_enrage()
-            if enrage_cmd then
-              table.insert(out, enrage_cmd)
-            end
-            local morph_cmd = select_morph()
-            if morph_cmd then
-              table.insert(out, morph_cmd)
-            end
-            local exclude = {}
-            if enrage_aff then
-              table.insert(exclude, enrage_aff)
-            end
-            for _, cmd in ipairs(select_commands(exclude)) do
-              table.insert(out, cmd)
-            end
+          -- Free precommands: opportunistic ENRAGE (shield-strip / aff) + stay in form. The
+          -- enrage's aff is excluded from venom selection so we don't double-apply it.
+          local enrage_cmd, enrage_aff = select_enrage()
+          if enrage_cmd then
+            table.insert(out, enrage_cmd)
+          end
+          local morph_cmd = select_morph()
+          if morph_cmd then
+            table.insert(out, morph_cmd)
+          end
+          local exclude = {}
+          if enrage_aff then
+            table.insert(exclude, enrage_aff)
+          end
+          for _, cmd in ipairs(select_commands(exclude)) do
+            table.insert(out, cmd)
           end
 
           table.insert(out, "ASSESS")
@@ -908,11 +660,7 @@ function sentinel.dispatch()
               " allPrepped(TRIP)=" ..
               tostring(all_limbs_prepped("TRIP")) ..
               " impaled=" ..
-              tostring(is_impaled()) ..
-              " petrified=" ..
-              tostring(has_aff("petrified")) ..
-              " bashLanded=" ..
-              tostring(skullbash_landed())
+              tostring(is_impaled())
             )
             cecho(
               "\n<yellow>[Sentinel] LL=" ..
@@ -922,9 +670,7 @@ function sentinel.dispatch()
               " head=" ..
               tostring(limb_damage("head")) ..
               " parrying=" ..
-              tostring(targetparry) ..
-              " canPetrify=" ..
-              tostring(can_petrify())
+              tostring(targetparry)
             )
             cecho("\n<yellow>[Sentinel] -> " .. table.concat(out, " / "))
           end
@@ -946,9 +692,9 @@ end
 -- On bal/eq we hit now; otherwise arm so the balance timer fires us as late as
 -- possible (don't commit into rebounding, don't go full-auto).
 
--- Button handler -- call from the zz/xx/cc/vv aliases. finisher: "skullbash" (default),
--- "wrench", "dismember", or "lock". Backward compatible: false/nil -> skullbash, true ->
--- wrench. This is the ONLY write to state.finisher.
+-- Button handler -- call from the zz/xx aliases. finisher: "skullbash" (default) or "wrench".
+-- Backward compatible: false/nil -> skullbash, true -> wrench. This is the ONLY write to
+-- state.finisher.
 function sentinel.arm_next_bal(finisher)
   if finisher == true then
     finisher = "wrench"
@@ -985,20 +731,12 @@ function sentinel.on_balance(interval)
       )
 end
 
--- Wire to your "your skullbash lands" trigger. The ONE out-of-band signal: stamps
--- the time so the dismember route knows its SKULLBASH connected (see header).
-function sentinel.on_skullbash()
-  sentinel.state.skullbash_at = getEpoch()
-end
-
 function sentinel.reset()
   sentinel.state =
   {
     finisher = "skullbash",
     next_bal_timer = nil,
     next_bal_armed = false,
-    skullbash_at = nil,
-    last_target = nil,
     last_echo_at = nil,
   }
   notify("reset")
@@ -1053,19 +791,6 @@ function sentinel.status()
     "    <white>WRENCH: " ..
     (is_impaled() and "<green>IMPALED" or (both_legs_were_broken() and "<yellow>impale" or "<red>no"))
   )
-  local dis = "<red>no"
-  for _, m in ipairs({ "impaled", "trussed", "unconscious", "transfixed" }) do
-    if dismember_marker(m) then
-      dis = "<yellow>" .. m .. (m == "transfixed" and skullbash_landed() and " (bashed)" or "")
-      break
-    end
-  end
-  cecho("\n<yellow>|   <white>DISMEMBER: " .. dis)
-  cecho(
-    "    <white>PETRIFY: " ..
-    (can_petrify() and "<green>READY" or ("<red>" .. petrify_aff_count() .. "/5" .. (has_aff("blind") and " blind" or "")))
-  )
-  cecho("    <white>LOCK: " .. (is_locked() and "<green>YES" or "<red>no"))
   cecho("\n<yellow>+------------------------------------------------+")
   cecho("\n<yellow>| <white>Prone: " .. (is_prone() and "<green>YES" or "<red>no"))
   cecho("  <white>Parry: <cyan>" .. tostring(targetparry or "none"))
