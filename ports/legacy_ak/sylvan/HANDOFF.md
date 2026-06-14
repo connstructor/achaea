@@ -62,7 +62,7 @@ Each step: start condition → action; completion = next step's start.
    `CAST FEEDBACK AT <target>` while feedback isn't on target. Spell prio =
    `CONFIG.WW_PRIO` (paralysis, clumsiness, healthleech, dizziness, epilepsy,
    sensitivity). Done: ae >= 40.
-5. ae >= 40 → `THORNREND <t> <venom> left leg LOBELIA` + `SWEEP QUARTERSTAFF <t>` same
+5. ae >= 40 → `THORNREND <t> <venom> left leg LOBELIA` + `SWING QUARTERSTAFF <t>` same
    balance (break + prone). Venom prio = herb selector. Sets 6s commit latch. Breaks are
    double-gated: ae >= gate AND limb prepped (a restored 0% leg can never hijack).
 6. Latch + ae >= 40 → `OVERCHARGE STATIC CYCLONE` (exactly; expected to grant

@@ -98,7 +98,7 @@ sylvan.dispatch()
 atk = last_atk()
 check("step5 break: venom prio + LOBELIA + SWEEP",
     atk and atk:find("THORNREND victim CURARE left leg LOBELIA", 1, true)
-    and atk:find("SWEEP QUARTERSTAFF victim", 1, true), atk)
+    and atk:find("SWING QUARTERSTAFF victim", 1, true), atk)
 check("step5: commit latch set", sylvan.state.commit_latch == true)
 
 -- Step 6: leg broken, ae 40 -> banked overcharge once
@@ -196,7 +196,7 @@ ak.feedback = "victim"
 sylvan.dispatch()
 atk = last_atk()
 check("oneleg break: recipe venom + LOBELIA (seal never rides legs)",
-    atk and atk:find("THORNREND victim CURARE left leg LOBELIA", 1, true) and atk:find("SWEEP QUARTERSTAFF victim", 1, true), atk)
+    atk and atk:find("THORNREND victim CURARE left leg LOBELIA", 1, true) and atk:find("SWING QUARTERSTAFF victim", 1, true), atk)
 lb.victim.hits["left leg"] = 100
 sent = {}
 sylvan.dispatch()
