@@ -100,12 +100,13 @@ sentinel.dispatch()
 expect("notifies 'no target set'", last_notify == "no target set", last_notify)
 expect("queues nothing", last_setalias == nil)
 
-print("\n[2] prep phase (limbs at 0) -> ATK_PRIO strike + priority venom + framing")
+print("\n[2] prep phase (limbs at 0) -> flat priority opener + framing")
 fresh_state()
 sentinel.dispatch()
 expect_cmd("preamble WIELD spear", "WIELD spear452934 shield435542")
 expect_cmd("ORDER LOYALS KILL", "ORDER LOYALS KILL Bob")
-expect_cmd("LACERATE left leg w/ CURARE (paralysis is venom #1)", "LACERATE left leg CURARE")
+-- Opener lands two affs: haemophilia (LACERATE atk, #1) + dizziness (LARKSPUR, top focus venom).
+expect_cmd("opener: LACERATE (haemophilia) on the left leg + LARKSPUR (dizziness)", "LACERATE left leg LARKSPUR")
 expect_cmd("postamble ASSESS", "ASSESS")
 expect_cmd("postamble DISCERN", "DISCERN")
 local saw_setalias, saw_queue = false, false
@@ -194,12 +195,12 @@ fresh_state()
 set_limbs(90, 90, 90)
 sentinel.dispatch()
 expect_cmd("trip break, no anorexia -> SLIKE", "TRIP LEFT SLIKE")
--- TRIP break with anorexia already up -> ride priority (CURARE), not SLIKE.
+-- TRIP break with anorexia already up -> ride priority (LARKSPUR, dizziness is the top venom).
 fresh_state()
 set_limbs(90, 90, 90)
 aff("anorexia")
 sentinel.dispatch()
-expect_cmd("trip break, anorexia up -> priority CURARE", "TRIP LEFT CURARE")
+expect_cmd("trip break, anorexia up -> priority venom LARKSPUR", "TRIP LEFT LARKSPUR")
 expect("trip break, anorexia up -> not SLIKE", not has_cmd("SLIKE"))
 -- Second-leg axe with no slickness -> GECKO (seal the apply-block).
 fresh_state()
@@ -215,14 +216,14 @@ aff("prone")
 aff("slickness")
 sentinel.dispatch()
 expect("second-leg axe, slickness up -> not GECKO", not has_cmd("WITH GECKO"))
-expect_cmd("second-leg axe, slickness up -> priority CURARE", "WITH CURARE")
+expect_cmd("second-leg axe, slickness up -> priority venom LARKSPUR", "WITH LARKSPUR")
 -- Head break never takes a seal -> priority venom.
 fresh_state()
 set_limbs(120, 120, 90) -- both legs broken, head prepped, prone -> axe the head
 aff("prone")
 sentinel.dispatch()
 expect_cmd("head break -> axe the head", "THROW handaxe453711 AT Bob head")
-expect_cmd("head break -> priority CURARE (never a seal)", "WITH CURARE")
+expect_cmd("head break -> priority venom LARKSPUR (never a seal)", "WITH LARKSPUR")
 
 print("\n[6] shields: 2 -> RIVESTRIKE, 1 -> ENRAGE LEMMING")
 fresh_state()
@@ -258,24 +259,20 @@ sentinel.arm_next_bal(false)
 expect("off-balance -> arms instead of firing", sentinel.state.next_bal_armed == true and last_setalias == nil)
 expect("off-balance -> notify 'armed'", last_notify == "armed", last_notify)
 
-print("\n[9] no double-apply: the ATK/ENRAGE aff is excluded from venom selection")
--- haemophilia + impatience up -> ATK_PRIO picks weariness (GOUGE). asthma + clumsiness up too,
--- so the venom slot's next lacked aff WOULD be weariness (vernalius) -- but the atk's aff is
--- excluded from venom selection, so it skips to the next priority (CURARE). weariness lands once.
+print("\n[9] no double-apply: the atk/enrage aff is excluded from venom selection")
+-- atk lands weariness (GOUGE); the venom must skip its own weariness entry (VERNALIUS) and move on.
 fresh_state()
-for _, a in ipairs({"haemophilia", "impatience", "asthma", "clumsiness"}) do aff(a) end
+for _, a in ipairs({"haemophilia", "impatience", "epilepsy", "dizziness", "stupidity", "asthma", "clumsiness"}) do aff(a) end
 sentinel.dispatch()
 expect_cmd("atk lands weariness via GOUGE", "GOUGE")
 expect("venom does NOT also land weariness (no VERNALIUS)", not has_cmd("VERNALIUS"))
-expect_cmd("venom slot moves on past weariness (CURARE, paralysis #1)", "CURARE")
--- healthleech + hallucinations up -> ENRAGE_PRIO picks sensitivity (RAVEN). The enrage's aff is
--- excluded from venom selection, so the venom skips sensitivity (prefarar).
+expect_cmd("venom moves on past weariness (sensitivity/PREFARAR)", "PREFARAR")
+-- enrage lands sensitivity (RAVEN); the venom must skip its own sensitivity entry (PREFARAR).
 fresh_state()
-for _, a in ipairs({"healthleech", "hallucinations", "asthma", "clumsiness", "weariness"}) do aff(a) end
+for _, a in ipairs({"healthleech", "dizziness", "stupidity", "asthma", "clumsiness", "weariness"}) do aff(a) end
 sentinel.dispatch()
 expect_cmd("enrage lands sensitivity via RAVEN", "ENRAGE RAVEN")
 expect("venom does NOT also land sensitivity (no PREFARAR)", not has_cmd("PREFARAR"))
-expect_cmd("venom slot moves on past sensitivity (CURARE, paralysis #1)", "CURARE")
 
 print("\n[10] select_aff reinforce -> re-up the lowest-confidence aff; all at 100 -> first")
 -- All ATK affs up but at different confidences -> reinforce the least certain (weariness 60).
@@ -307,6 +304,18 @@ aff("prone")
 sentinel.dispatch()
 sentinel.dispatch()
 expect("engine never rewrites the finisher preference", sentinel.state.finisher == "wrench")
+
+print("\n[12] flat priority: focus before kelp; anorexia/slickness left to the breaks")
+-- Focus stack up (haemo/impatience/dizziness/stupidity) -> the venom reaches the kelp foundation.
+fresh_state()
+for _, a in ipairs({"haemophilia", "impatience", "dizziness", "stupidity"}) do aff(a) end
+sentinel.dispatch()
+expect_cmd("focus up -> venom reaches the kelp foundation (asthma/KALMIA)", "KALMIA")
+-- All focus + kelp up -> the venom only now falls through to anorexia (low prep fallback; SLIKE).
+fresh_state()
+for _, a in ipairs({"dizziness", "stupidity", "asthma", "clumsiness", "weariness", "sensitivity"}) do aff(a) end
+sentinel.dispatch()
+expect_cmd("focus+kelp up -> venom falls through to anorexia (SLIKE)", "SLIKE")
 
 ------------------------------------------
 -- Summary

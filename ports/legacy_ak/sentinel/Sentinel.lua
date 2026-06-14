@@ -18,8 +18,16 @@
 -- Both killpaths prep + break from one shared engine. A free ENRAGE (shield-strip / aff)
 -- and a MORPH-to-default precommand ride on every dispatch.
 --
--- VENOM RULES (the only special-casing): a break hit seals the lock when it can, otherwise
--- it rides VENOM_PRIO top-down.
+-- AFFLICTION PLAN: a simple priority. Each hit lands two affs -- one from the attack (ATK_PRIO)
+-- and one from the venom (VENOM_PRIO) -- always the highest-priority aff they still lack, with the
+-- attack's aff excluded from the venom pick so we never double-apply. Priority is haemophilia,
+-- then the impatience / focus affs, then the asthma / kelp affs. We DON'T chase anorexia and
+-- slickness in prep -- they're sealed for free on the breaks (see below), so they sit at the
+-- bottom of VENOM_PRIO as a fallback only. When a whole list is up, select_aff reinforces the
+-- least-certain aff.
+--
+-- BREAK SEALS (the one special-case): a break hit seals the lock when it can, else rides
+-- VENOM_PRIO.
 --   * the TRIP break          -> SLIKE (anorexia) while they still lack anorexia, else priority.
 --   * the second-leg axe break -> GECKO (slickness) while they still lack slickness, else priority.
 --   * the head break, and every prep hit -> priority venom (VENOM_PRIO).
@@ -61,12 +69,14 @@ sentinel.CONFIG =
   WEAPONS = { SPEAR = "spear452934", HANDAXE = "handaxe453711", SHIELD = "shield435542" },
   -- Limbs we prep and break, in order: left leg -> right leg -> head.
   LIMB_PRIO = { "left leg", "right leg", "head" },
+  -- Attack-slot affs, highest priority first: bleeding (haemophilia), then the focus affs
+  -- (impatience, epilepsy), then the kelp aff weariness. The atk slot also builds limb damage.
   ATK_PRIO =
   {
     { aff = "haemophilia", atk = "LACERATE" },
     { aff = "impatience",  atk = "DOUBLESTRIKE" },
-    { aff = "weariness",   atk = "GOUGE" },
     { aff = "epilepsy",    atk = "DOUBLESTRIKE" },
+    { aff = "weariness",   atk = "GOUGE" },
   },
   ENRAGE_PRIO =
   {
@@ -76,21 +86,24 @@ sentinel.CONFIG =
     { aff = "nausea",         enrage = "BADGER" },
     { aff = "hallucinations", enrage = "WOLF" },
   },
-  -- Venom priority. Break hits override this with SLIKE/GECKO to seal the lock (see header);
-  -- everything else (prep + the head break) rides this list top-down.
+  -- Venom-slot affs, highest priority first: the focus affs (dizziness, stupidity), then the
+  -- asthma/kelp stack (asthma is the foundation; clumsiness/weariness/sensitivity deepen it).
+  -- anorexia/slickness sit low -- they're sealed on the trip/axe breaks (see header), not chased
+  -- in prep -- and the off-plan tail is purely situational. Break hits override the top with
+  -- SLIKE/GECKO while those seals are still open.
   VENOM_PRIO =
   {
-    { aff = "paralysis",    venom = "CURARE" },     -- #1: tempo/bait, hardens every cure + tree
-    { aff = "clumsiness",   venom = "XENTIO" },     -- kelp depth: keeps asthma/weariness >=67 through a cure
+    { aff = "stupidity",    venom = "ACONITE" },    -- focus
+    { aff = "dizziness",    venom = "LARKSPUR" },   -- focus
     { aff = "asthma",       venom = "KALMIA" },     -- kelp seal (blocks smoking): the foundation
-    { aff = "anorexia",     venom = "SLIKE" },      -- eat-block; also forced by the TRIP break
-    { aff = "slickness",    venom = "GECKO" },      -- apply-block; also forced by the second-leg axe break
-    { aff = "weariness",    venom = "VERNALIUS" },  -- kelp depth + class blocker (Fitness)
-    { aff = "stupidity",    venom = "ACONITE" },    -- mental cure-disruptor + goldenseal depth
-    { aff = "dizziness",    venom = "LARKSPUR" },   -- mental + goldenseal depth
-    { aff = "recklessness", venom = "EURYPTERIA" }, -- mental: lowers their cure chances
-    { aff = "sensitivity",  venom = "PREFARAR" },   -- kelp depth (+ damage amp)
+    { aff = "weariness",    venom = "VERNALIUS" },  -- kelp depth (also ATK GOUGE; deduped)
+    { aff = "clumsiness",   venom = "XENTIO" },     -- kelp depth
+    { aff = "sensitivity",  venom = "PREFARAR" },   -- kelp depth
+    { aff = "anorexia",     venom = "SLIKE" },      -- sealed by the TRIP break; low prep fallback
+    { aff = "slickness",    venom = "GECKO" },      -- sealed by the axe break; low prep fallback
+    { aff = "paralysis",    venom = "CURARE" },     -- final lock aff
     -- Off-plan / situational tail.
+    { aff = "recklessness", venom = "EURYPTERIA" },
     { aff = "darkshade",    venom = "DARKSHADE" },
     { aff = "voyria",       venom = "VOYRIA" },
     { aff = "nausea",       venom = "EUPHORBIA" },
@@ -353,8 +366,8 @@ local function select_aff(prio_list, exclude)
   return min_entry or prio_list[1]
 end
 
--- The next lacked VENOM_PRIO aff's venom -- used by prep and the head break. Break hits
--- override this with SLIKE/GECKO while those seals are still open (see next_leg_break).
+-- The next lacked VENOM_PRIO aff's venom -- used by prep and the head break. Break hits override
+-- this with SLIKE/GECKO while those seals are still open (see next_leg_break).
 local function priority_venom(exclude)
   return select_aff(CONFIG.VENOM_PRIO, exclude).venom
 end
@@ -442,7 +455,7 @@ end
 -- Break the next leg toward both-legs-broken-and-prone. Standing -> TRIP a prepped, unparried
 -- leg (breaks it + drops them), sealing anorexia with SLIKE while they still lack it. Down ->
 -- axe whichever leg still stands (prone bypasses parry), sealing slickness with GECKO while
--- they still lack it. Either seal falls back to priority venom once that aff is up. nil when
+-- they still lack it. Either seal falls back to the ladder venom once that aff is up. nil when
 -- nothing is breakable right now -- the caller then falls back to the prep engine to rebuild.
 local function next_leg_break(exclude)
   if not is_prone() then
@@ -465,7 +478,7 @@ local function next_leg_break(exclude)
   return nil
 end
 
--- Trip a leg, axe the other, axe the head (priority venom on the head). Returns the next break
+-- Trip a leg, axe the other, axe the head (ladder venom on the head). Returns the next break
 -- command, or nil once both legs AND the head are broken (caller proceeds to its kill). nil
 -- mid-break means nothing is breakable right now -> caller falls back to the prep engine.
 local function break_legs_and_head(exclude)
@@ -711,14 +724,14 @@ function sentinel.arm_next_bal(finisher)
   notify(finisher == "skullbash" and "armed" or ("armed (" .. finisher .. ")"))
 end
 
--- Balance-used trigger handler. Arms a tempTimer for (interval - latency), so we
+-- Balance-used trigger handler. Arms a tempTimer for (interval - latency * 2), so we
 -- dispatch the instant balance returns (combo built from CURRENT state) without
 -- going full-auto. If we weren't armed, the timer expires harmlessly.
 function sentinel.on_balance(interval)
   if type(interval) ~= "number" then
     return
   end
-  local prearm = CONFIG.PREARM_INTERVAL or getNetworkLatency()
+  local prearm = CONFIG.PREARM_INTERVAL or (getNetworkLatency() * 2)
   sentinel.state.next_bal_timer =
       tempTimer(
         math.max(0, interval - prearm),

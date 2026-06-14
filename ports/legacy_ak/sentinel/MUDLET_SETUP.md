@@ -74,11 +74,12 @@ up, otherwise the §1 timer fires it on balance return.
 | `^zz$` | `sentinel.arm_next_bal(false)` | **skullbash** (default) — prep both legs + the head, then break leg/leg/head and SKULLBASH while they're prone with the head broken. |
 | `^xx$` | `sentinel.arm_next_bal(true)` | **wrench** — prep both legs, TRIP the first + axe the second, then IMPALE while prone and WRENCH once impaled. |
 
-> **Venom on break hits.** Both killpaths share the prep + break engine and ride `VENOM_PRIO`
-> top-down, with two seals on the break hits: the **TRIP** break carries **SLIKE** (anorexia)
-> while they still lack anorexia, and the **second-leg axe** break carries **GECKO** (slickness)
-> while they still lack slickness. Once that seal is up the hit falls back to priority venom.
-> The head break and every prep hit always use priority venom.
+> **Venom on break hits.** Both killpaths share the prep + break engine and ride a simple venom
+> priority (`VENOM_PRIO`: focus affs, then the asthma/kelp stack), with two seals on the break
+> hits: the **TRIP** break carries **SLIKE** (anorexia) while they still lack anorexia, and the
+> **second-leg axe** break carries **GECKO** (slickness) while they still lack slickness. Once
+> that seal is up the hit falls back to priority venom. The head break and every prep hit always
+> use priority venom.
 
 The killpath you pick is a **preference**, not an engine latch: it persists until you press a
 different arm alias. So `xx` keeps driving wrench on every subsequent arm until you press `zz`
