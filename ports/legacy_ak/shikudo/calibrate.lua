@@ -15,8 +15,9 @@ USAGE:
 
 WHAT IT DOES:
   1. Clears hyperfocus (so values aren't halved).
-  2. For each test: adopt form (free, instant cooldown via combo eq),
-     fire `combo target <attack>`, wait 5s, read lb damage delta.
+  2. For each test: adopt form, wait for the form-switch balance
+     (default 4.1s), snapshot limb damage, fire `combo target <attack>`,
+     wait 5s, read lb damage delta.
   3. Prints a Lua table at the end you can paste over the existing
      monk.shikudo.limbDamage definition.
 
@@ -55,7 +56,32 @@ skCalibrate.tests = {
   {"Gaital",    "jinzuku",            "jinzuku",      "torso"},
 }
 
-skCalibrate.delaySeconds = 5  -- between attacks; bump if your eq is slow
+skCalibrate.formSwitchDelaySeconds = skCalibrate.formSwitchDelaySeconds or 4.1
+skCalibrate.delaySeconds = skCalibrate.delaySeconds or 5  -- after each combo; bump if your eq is slow
+
+skCalibrate.defaultDamage = skCalibrate.defaultDamage or {
+  flashheel = 9.2,
+  frontkick = 9.2,
+  risingkick = 9.2,
+  spinkick = 27.0,
+
+  kuro = 9.2,
+  ruku = 9.2,
+  thrust = 14.5,
+  needle = 14.6,
+  nervestrike = 13.4,
+  livestrike = 13.4,
+  hiru = 9.4,
+  hiraku = 9.4,
+  dart = 7.3,
+  jinzuku = 9.2,
+}
+
+skCalibrate.outputOrder = {
+  kicks = {"flashheel", "frontkick", "risingkick", "spinkick"},
+  staff = {"kuro", "ruku", "thrust", "needle", "nervestrike",
+           "livestrike", "hiru", "hiraku", "dart", "jinzuku"}
+}
 
 -- ── runtime state ────────────────────────────────────────────
 skCalibrate.idx     = 0
@@ -75,28 +101,69 @@ local function readLimb(limb)
   return lb[skCalibrate._tgt].hits[limb] or 0
 end
 
-local function sendAtk(stack)
+local function sendAtk(stack, queueType)
   send("SETALIAS ATK " .. stack)
-  send("QUEUE ADDCLEARFULL FREE ATK")
+  send("QUEUE ADDCLEARFULL " .. (queueType or "FREE") .. " ATK")
+end
+
+local function loadedDamage(name)
+  local tableRef = monk and monk.shikudo and monk.shikudo.limbDamage
+  local value = tableRef and tableRef[name]
+  if type(value) == "number" then return value end
+  return skCalibrate.defaultDamage[name]
+end
+
+local function outputDamage(name)
+  local result = skCalibrate.results[name]
+  if type(result) == "number" and result > 0 then
+    return result, ""
+  end
+
+  local fallback = loadedDamage(name) or 0
+  if result == nil then
+    return fallback, " -- unchanged; no calibration result"
+  end
+  return fallback, " -- unchanged; invalid calibration result was " .. string.format("%.1f", result)
+end
+
+local function printDamageLine(name)
+  local value, note = outputDamage(name)
+  cecho(string.format("\n  %-12s = %.1f,%s", name, value, note))
 end
 
 -- ── core ─────────────────────────────────────────────────────
-local function fireTest(t)
-  local form, cmd, name, limb = t[1], t[2], t[3], t[4]
-  skCalibrate._before = readLimb(limb)
-  skCalibrate._cur    = {name = name, limb = limb}
+local recordAndNext
+
+local function fireCombo()
+  if not skCalibrate.running or not skCalibrate._cur then return end
+
+  local cur = skCalibrate._cur
+  skCalibrate._before = readLimb(cur.limb)
 
   cecho(string.format(
     "\n<yellow>[skCal %d/%d] %s | combo %s %s -> %s (before: %.2f%%)",
-    skCalibrate.idx, #skCalibrate.tests, form,
-    skCalibrate._tgt, cmd, limb, skCalibrate._before))
+    skCalibrate.idx, #skCalibrate.tests, cur.form,
+    skCalibrate._tgt, cur.cmd, cur.limb, skCalibrate._before))
 
-  -- Always adopt; cheap and ensures we land in the right form regardless of
-  -- where the previous test left us.
-  sendAtk("adopt " .. form .. " form/combo " .. skCalibrate._tgt .. " " .. cmd)
+  sendAtk("combo " .. skCalibrate._tgt .. " " .. cur.cmd, "FREE")
+  skCalibrate._timer = tempTimer(skCalibrate.delaySeconds, recordAndNext)
 end
 
-local function recordAndNext()
+local function fireTest(t)
+  local form, cmd, name, limb = t[1], t[2], t[3], t[4]
+  skCalibrate._cur = {form = form, cmd = cmd, name = name, limb = limb}
+
+  cecho(string.format(
+    "\n<yellow>[skCal %d/%d] switching to %s; firing %s in %.1fs",
+    skCalibrate.idx, #skCalibrate.tests, form, cmd,
+    skCalibrate.formSwitchDelaySeconds))
+
+  -- Always adopt and wait; without enough kata, form switching costs balance.
+  sendAtk("adopt " .. form .. " form", "EQBAL")
+  skCalibrate._timer = tempTimer(skCalibrate.formSwitchDelaySeconds, fireCombo)
+end
+
+recordAndNext = function()
   if not skCalibrate.running then return end
 
   -- Snapshot previous test
@@ -120,7 +187,6 @@ local function recordAndNext()
   end
 
   fireTest(t)
-  skCalibrate._timer = tempTimer(skCalibrate.delaySeconds, recordAndNext)
 end
 
 -- ── public API ───────────────────────────────────────────────
@@ -141,8 +207,9 @@ function skCalibrate.run()
   skCalibrate.running = true
 
   cecho(string.format(
-    "\n<cyan>[skCal] %d tests, %ds delay, target = <yellow>%s",
-    #skCalibrate.tests, skCalibrate.delaySeconds, skCalibrate._tgt))
+    "\n<cyan>[skCal] %d tests, %.1fs form delay, %ds hit delay, target = <yellow>%s",
+    #skCalibrate.tests, skCalibrate.formSwitchDelaySeconds,
+    skCalibrate.delaySeconds, skCalibrate._tgt))
   cecho("\n<cyan>[skCal] Clearing hyperfocus...")
 
   -- Clear hyperfocus so damage isn't halved on the focused limb.
@@ -165,18 +232,21 @@ function skCalibrate.show()
   cecho("\n<cyan>====================================================")
   cecho("\n<cyan>  Shikudo limb damage — paste into monk.shikudo.limbDamage")
   cecho("\n<cyan>====================================================")
+  cecho("\nmonk = monk or {}")
+  cecho("\nmonk.shikudo = monk.shikudo or {}")
   cecho("\nmonk.shikudo.limbDamage = {")
   cecho("\n  -- Kicks")
-  for _, name in ipairs({"flashheel", "frontkick", "risingkick"}) do
-    local v = skCalibrate.results[name]
-    cecho(string.format("\n  %-12s = %s,", name, v and string.format("%.1f", v) or "??"))
+  for _, name in ipairs(skCalibrate.outputOrder.kicks) do
+    if name == "spinkick" then
+      local value = loadedDamage(name) or 27.0
+      cecho(string.format("\n  %-12s = %.1f, -- unchanged; requires prone/manual calibration", name, value))
+    else
+      printDamageLine(name)
+    end
   end
-  cecho("\n  spinkick     = 27.0,   -- not calibrated (requires prone)")
   cecho("\n  -- Staff strikes")
-  for _, name in ipairs({"kuro", "ruku", "thrust", "needle", "nervestrike",
-                          "livestrike", "hiru", "hiraku", "dart", "jinzuku"}) do
-    local v = skCalibrate.results[name]
-    cecho(string.format("\n  %-12s = %s,", name, v and string.format("%.1f", v) or "??"))
+  for _, name in ipairs(skCalibrate.outputOrder.staff) do
+    printDamageLine(name)
   end
   cecho("\n}")
   cecho("\n")

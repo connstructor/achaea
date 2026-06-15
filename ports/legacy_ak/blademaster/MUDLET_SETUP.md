@@ -4,18 +4,21 @@
 `tempRegexTrigger`, no event handler. You create those by hand in Mudlet. This
 doc lists every item to add.
 
-- **Aliases** call the `bm*()` handler functions — they **arm** the system.
-- **Triggers** call the `blademaster.on*` / `blademaster.capture*` callbacks.
-- **One balance/equilibrium-"used" trigger** is **required** — it's what fires
-  your attacks (arms a just-in-time `tempTimer`); see §1. Without it you only get
-  fire-when-ready dispatch straight from the alias.
+* **Aliases** call the `bm*()` handlers — they **arm** the system.
+* **Triggers** call `blademaster.on_*`.
+* **One balance/equilibrium-"used" trigger** is **required** — it's the engine
+  that fires your attacks (see §1).
 
-All regex below is in **Mudlet UI form** (single backslash). Don't double-escape —
-the `\d` / `\w` / `\.` you see here is exactly what you type into the pattern box.
-In Mudlet, `matches[1]` is the whole match and `matches[2]`, `matches[3]`, … are
-the capture groups.
+Most of what the old port needed triggers for is now read straight from AK:
+**impaled** comes from `affstrack.impale == "Me"`, **bleeding** from `ak.bleeding`,
+limb damage from `lb[target].hits`. Slash damage is a static per-form table
+(`blademaster.CONFIG.DMG`, keyed on `Legacy.Tannivh.form`) — no calibration trigger.
+So the brokenstar section is just one trigger.
 
----
+All regex below is in **Mudlet UI form** (single backslash). In Mudlet,
+`matches[1]` is the whole match and `matches[2]`, `matches[3]`, … are the groups.
+
+***
 
 ## 0. Load order
 
@@ -25,222 +28,121 @@ the capture groups.
 3. Add the items below. They all reference `blademaster.*`, which exists after
    the script runs, so ordering within the profile doesn't matter at runtime.
 
----
+***
 
 ## 1. REQUIRED — balance / equilibrium "used" trigger (fires your attacks)
 
-This is the engine. When you spend balance (or eq), your game prints a message
-that includes the recovery delay. Trigger on it, capture that delay, and pass it
-to `scheduleDispatch` — it arms a `tempTimer` for
-`recoverTime - getNetworkLatency()*2` and runs the dispatch the instant balance/eq
-returns, so the combo is built from **current** limb / affliction / bleed state.
+This is the engine. When you spend balance (or eq), your game prints a line that
+includes the recovery delay. Trigger on it, capture that delay, and pass it to
+`on_recover` — it arms a `tempTimer` for `recoverTime - getNetworkLatency()` and
+runs the dispatch the instant balance/eq returns, so the combo is built from
+**current** limb / affliction / bleed state.
 
 Type: **Perl regex**. Capture the recovery time (seconds) as a group → `matches[2]`:
 
 ```
-«your balance/eq-used line, with the recovery time captured»
-```
-```lua
-blademaster.scheduleDispatch(matches[2])
-```
-
-Example shape (replace with your real line):
-```
 ^Balance Used: (\d+\.?\d*)
 ```
 
+```lua
+blademaster.on_recover(matches[2])
+```
+
 Notes:
-- The captured value must be **seconds** (a float). If your line reports ms:
-  `blademaster.scheduleDispatch(tonumber(matches[2]) / 1000)`.
-- Wire **balance** at minimum (BM slashes are balance-based). Pointing an eq-used
-  line at the same `scheduleDispatch` is safe — the `QUEUE ADDCLEARFULL FREESTAND`
-  queue holds the attack until balance is actually up, so an eq-timed fire just
-  queues a touch early.
-- `scheduleDispatch` only *schedules*; the dispatch fires only if the system is
+
+* The captured value must be **seconds** (a float). If your line reports ms:
+  `blademaster.on_recover(tonumber(matches[2]) / 1000)`.
+* Wire **balance** at minimum (BM slashes are balance-based). Pointing an eq-used
+  line at the same `on_recover` is safe — the `QUEUE ADDCLEARFULL FREESTAND`
+  queue holds the attack until balance is actually up.
+* `on_recover` only *schedules*; the dispatch fires only if the system is
   **armed** (you pressed an alias), then disarms — one attack per press.
-- **Without this trigger:** only `arm()`'s fire-when-ready path works — one attack
-  each time you press an alias *while eqbal is up*; the "queue during
-  recovery, fire on return" timing is lost.
+* **Without this trigger:** only the fire-when-ready path works — one attack each
+  time you press an alias *while eqbal is up*; the queue-during-recovery timing is lost.
 
-> **No timed used-message?** Use GMCP instead: a Script with registered event
-> `gmcp.Char.Vitals` that, when `bal` flips 1→0, calls
-> `blademaster.scheduleDispatch(<recovery seconds>)` with a duration you supply
-> (e.g. from your curing system / class balance constant).
+> **No timed used-message?** Use GMCP instead: a Script registered on
+> `gmcp.Char.Vitals` that, when `bal` flips 1→0, calls `blademaster.on_recover(<recovery seconds>)`.
 
----
+***
 
 ## 2. Aliases
 
-Mudlet aliases are regex. Create each with the given pattern and script. Pressing
-an alias **arms** the system (and fires immediately if eqbal is up);
-otherwise the §1 used-trigger's timer dispatches the attack on balance return.
+Mudlet aliases are regex. Pressing an alias **arms** the system (and fires
+immediately if eqbal is up); otherwise the §1 trigger dispatches on balance return.
 
 | Pattern | Script | What it does |
-|---|---|---|
+| --- | --- | --- |
 | `^bm$` | `bm()` | arm in current mode |
 | `^bmd$` | `bmd()` | double-prep (legs) |
 | `^bmdq$` | `bmdq()` | quad-prep (arms + legs) |
 | `^bmbs$` | `bmbs()` | brokenstar (bleed kill) |
 | `^bmgroup$` | `bmgroup()` | group pommelstrike lock |
-| `^bmreset$` | `bmreset()` | full state reset |
-| `^bmstatus$` | `bmstatus()` | double-prep status panel |
-| `^bmstatusq$` | `bmstatusq()` | quad-prep status panel |
+| `^bmreset$` | `bmreset()` | clear armed/latch state |
+| `^bmstatus$` | `bmstatus()` | one-line status echo |
 
----
+***
 
-## 3. Triggers — damage capture (per-stance auto-calibration)
+## 3. REQUIRED for brokenstar — impaleslash trigger
 
-These feed `blademaster.limbDamage[stance]` so the prep/break math tracks your
-actual slash damage. Type: **Perl regex**.
+The brokenstar route reads **impaled** (`affstrack.impale`) and **bleeding**
+(`ak.bleeding`) from AK, so it needs no impale / writhe / withdraw / bladetwist /
+stand-up triggers. The one thing AK can't tell us is that *our* impaleslash
+landed (which gates bladetwist → brokenstar), so wire this. Type: **Perl regex**.
 
-**Leg damage**
 ```
-^As you carve into .+, you perceive that you have dealt (\d+\.?\d*)% damage to \w+ (left|right) leg
+steady in your grip, you drag its razor edge across arteries within [\w'\-]+'s abdomen\.$
 ```
+
 ```lua
-blademaster.captureLegDamage(matches[2], matches[3])
+blademaster.on_impaleslash()
 ```
 
-**Arm damage**
-```
-^As you carve into .+, you perceive that you have dealt (\d+\.?\d*)% damage to \w+ (left|right) arm
-```
-```lua
-blademaster.captureArmDamage(matches[2], matches[3])
-```
+The latch self-clears after `CONFIG.IMPALESLASH_LATCH` seconds (29 by default),
+matching Levi's `timpaleslash`, so it can never get stuck and it guards brokenstar
+against stale `ak.bleeding` from a previous target.
 
-**Upper (torso/head) damage**
-```
-^As you carve into .+, you perceive that you have dealt (\d+\.?\d*)% damage to \w+ (torso|head)
-```
-```lua
-blademaster.captureUpperDamage(matches[2], matches[3])
-```
+***
 
----
+## 4. Recommended — hamstring trigger
 
-## 4. Triggers — brokenstar state machine
+Without it, prep strikes never advance past `hamstring` (the ladder thinks
+hamstring is always expired and re-applies it instead of layering
+paralysis/hypochondria/weariness/clumsiness). Limb breaks still work; only the
+secondary affliction stack stalls.
 
-These drive the impale → bladetwist → brokenstar progression and the
-writhe/stand recovery. Type: **Perl regex**.
+> The exact game line isn't bundled (Levi sourced it separately). Hamstring once,
+> copy the confirmation line from your log, anchor a pattern on it. Placeholder:
 
-**Impale landed**
-```
-^You draw your blade back and plunge it deep into the body of ([\w'\-]+) impaling [\w'\-]+ to the hilt\.$
-```
-```lua
-blademaster.onImpaleSuccess()
-```
-
-**Impaleslash landed**
-```
-steady in your grip, you drag its razor edge across arteries within ([\w'\-]+)'s abdomen\.$
-```
-```lua
-blademaster.onImpaleslashSuccess()
-```
-
-**Bleeding hit 700+ (heavy torrents)**
-```
-^You observe heavy torrents of lifeblood spilling from ([\w'\-]+)'s near-fatal wounds\.$
-```
-```lua
-blademaster.onBleedingReady()
-```
-
-**Bleeding value update** (from `assess` / `discern` — `[280]`, `[850]`, …)
-```
-You observe .+ \[(\d+)\]
-```
-```lua
-blademaster.onBleedingUpdate(matches[2])
-```
-
-**Blade withdrawn**
-```
-^You wrench your blade free of ([\w'\-]+)
-```
-```lua
-blademaster.onWithdrawSuccess()
-```
-
-**Target writhed free of impale**
-```
-manages to writhe \w+self free of the weapon which impaled
-```
-```lua
-blademaster.onTargetUnimpaled()
-```
-
-**Bladetwist fired** (the triple-twist combo echo — increments the twist count)
-```
-BLADETWIST \[\|\] BLADETWIST \[\|\] BLADETWIST
-```
-```lua
-blademaster.onBladetwistSuccess()
-```
-
-**Target stands up**
-```
-^(\w+) stands up\.$
-```
-```lua
-blademaster.onTargetStandUp(matches[2])
-```
-
----
-
-## 5. Recommended triggers
-
-**Hamstring applied** — *recommended.* Without it, prep strikes never advance
-past `hamstring` (the system thinks hamstring is always expired and re-applies it
-every tick instead of layering paralysis/hypochondria/weariness/clumsiness). Limb
-breaks still work; only the secondary affliction stack stalls.
-
-> The exact game line isn't bundled (Levi sourced it from a separate trigger).
-> Hamstring once, copy the confirmation line from your log, and anchor a pattern
-> on it. Placeholder:
 ```
 «your hamstring-application confirmation line»
 ```
+
 ```lua
-blademaster.onHamstringApplied()
+blademaster.on_hamstring()
 ```
 
-**Leg salve (prone timer)** — *optional.* Feeds the vestigial prone timer
-(`onLegSalveDetected`); no behavioral effect since balanceslash was dropped. Add
-only if you later revive that mechanic.
-```
-takes some salve from a vial and rubs it on \w+ legs
-```
-```lua
-blademaster.onLegSalveDetected()
-```
+***
 
----
+## 5. Optional — slash-damage calibration (only if you loaded `calibrate.lua`)
 
-## 6. Optional — calibration aliases (only if you loaded `calibrate.lua`)
+Slash damage lives in the **static** `blademaster.CONFIG.DMG` table (keyed on form).
+There's no auto-calibration trigger — `bmcal` measures the four slashes in your
+current form so you can paste real numbers in. Switch into a form, run `bmcal`,
+repeat per form, then `bmcalshow`.
 
 | Pattern | Script | What it does |
-|---|---|---|
-| `^bmcal(?:\s+(\w+))?$` | `bmcal(matches[2])` | calibrate a stance (arg) or current stance |
-| `^bmcalshow$` | `bmcalshow()` | print paste-ready `blademaster.limbDamage` |
+| --- | --- | --- |
+| `^bmcal$` | `bmcal()` | measure the 4 slashes in the current form |
+| `^bmcalshow$` | `bmcalshow()` | print paste-ready `blademaster.CONFIG.DMG` |
 | `^bmcalstop$` | `bmcalstop()` | abort a calibration run |
-| `^bmcalreset$` | `bmcalreset()` | clear calibration results |
 
-`bmcal` with no stance (`matches[2]` is `nil`) calibrates the current stance.
-`calibrate.lua` uses an internal `tempTimer` to space its measurement attacks —
-that's a transient one-shot delay inherent to the tool, not a registered hook.
-
----
+***
 
 ## Quick checklist
 
-- [ ] `blademaster.lua` loaded as a Script
-- [ ] **balance/eq-used trigger** → `blademaster.scheduleDispatch(matches[2])` — REQUIRED (fires attacks)
-- [ ] 8 aliases (`bm`, `bmd`, `bmdq`, `bmbs`, `bmgroup`, `bmreset`, `bmstatus`, `bmstatusq`)
-- [ ] 3 damage-capture triggers (leg / arm / upper)
-- [ ] 8 brokenstar triggers (impale, impaleslash, bleeding-ready, bleeding-update, withdraw, writhe, bladetwist, stand-up)
-- [ ] hamstring trigger (recommended — needs your game line)
-- [ ] leg-salve trigger (optional)
-- [ ] `calibrate.lua` + 4 `bmcal*` aliases (optional)
+* \[ ] `blademaster.lua` loaded as a Script
+* \[ ] **balance/eq-used trigger** → `blademaster.on_recover(matches[2])` — REQUIRED (fires attacks)
+* \[ ] 7 aliases (`bm`, `bmd`, `bmdq`, `bmbs`, `bmgroup`, `bmreset`, `bmstatus`)
+* \[ ] **impaleslash trigger** → `blademaster.on_impaleslash()` — REQUIRED for brokenstar
+* \[ ] hamstring trigger → `blademaster.on_hamstring()` (recommended)
+* \[ ] (optional) fill `blademaster.CONFIG.DMG` per form, by hand or with `calibrate.lua`
