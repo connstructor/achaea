@@ -1,107 +1,87 @@
-# Shikudo God Mode - Legacy / AK Port
+# Shikudo God Mode — Legacy / AK Port
 
-Fresh port of LEVI/Ataxia `009_CC_Shikudo_GodMode.lua`.
+Mapping doc for the Shikudo **god-mode** port. Source of truth is the LEVI/Ataxia
+`009_CC_Shikudo_GodMode.lua`; the AK plumbing mirrors the sibling monk port
+`ports/legacy_ak/tekura/tekura.lua`.
 
-The previous consolidated Shikudo port has been removed. This module is now
-GodMode-only: 5-limb prep, Gaital execute, lock fork, low-HP Maelstrom fork.
+**Destination:** `ports/legacy_ak/shikudo/shikudo.lua` — single file, `monk.shikudo.*`.
 
-## Entry Points
+**Scope:** *lean offense.* The 5-limb prep engine, form management
+(Tykonos→Willow→Rain→Oak→Gaital), the stateless 3-combo execute, and the two
+finisher forks (DISPATCH + soft-LOCK). Self-sustain from the Levi `run()` is
+**dropped** (see below).
 
-| Function | Purpose |
+---
+
+## Tier 1 — AK (target state)
+
+| Levi (godmode) | AK replacement |
 | --- | --- |
-| `monk.shikudo.arm()` | Fires now if balance/equilibrium are up; otherwise arms one GodMode hit for the next balance timer |
-| `monk.shikudo.on_balance(interval)` | Balance/equilibrium-used trigger hook for timer-based arming |
-| `monk.shikudo.dispatch()` | Runs GodMode immediately |
-| `monk.shikudo.godmode.run()` | Runs GodMode directly |
-| `monk.shikudo.status()` | GodMode status |
-| `monk.shikudo.godmode.status()` | GodMode status directly |
-| `monk.shikudo.reset()` | Clears module-local GodMode flags |
-| `skgodmode()` | Alias wrapper: arm GodMode |
-| `skstatus()`, `skgmstatus()` | Alias wrappers: status |
-| `skreset()` | Alias wrapper: reset |
+| `haveAff("X")`, `tAffs.X` | `has("X")` → `affstrack.score[X] >= CONFIG.AFF_THRESHOLD` (30) |
+| `tAffs.damagedX` / `haveAff("brokenX")` | `limbBroken(limb)` → `getLimbDamage(limb) >= 100 or has("damaged"..k) or has("broken"..k)` |
+| `lb[target].hits[limb]` | unchanged (`getLimbDamage(limb)`) |
+| `ataxiaTemp.parriedLimb` | `targetparry` (global) |
+| `target` | unchanged |
+| `ataxiaTemp.hyperLimb` | `ak.limbs.hyperfocus` — read live, never tracked client-side |
+| `tCity` / Mhaldor `incapacitate` branch | removed — always `dispatch` |
 
-Compatibility wrappers `skdispatch()`, `sklock()`, and `skriftlock()` now warn and
-run GodMode. The old dispatch, lock, and riftlock engines are intentionally gone.
+## Tier 2 — Legacy (self state)
 
-## Legacy / AK Mappings
-
-| LEVI / Ataxia | Legacy / AK |
+| Levi (godmode) | Legacy replacement |
 | --- | --- |
-| `haveAff("x")`, `tAffs.x` | `affstrack.score[x] >= monk.shikudo.CONFIG.affThreshold` |
-| `tAffs.shield` | `ak.defs.shield` or `affstrack.score.shield` |
-| `lb[target].hits[limb]` | unchanged |
-| `ataxiaTemp.parriedLimb` | `targetparry` |
-| `ataxiaTemp.lastAssess` | `ak.currenthealth / ak.maxhealth * 100` |
-| `ataxiaTemp.hyperLimb` | `ak.limbs.hyperfocus` (`nil` / `false` / `"none"` means no hyperfocus) |
-| `ataxia.vitals.form/kata/kai` | `gmcp.Char.Vitals.charstats` |
-| `ataxia.vitals.hp/mp/maxhp/maxmp` | `gmcp.Char.Vitals` |
-| balance/equilibrium up | `gmcp.Char.Vitals.bal == "1"` and `gmcp.Char.Vitals.eq == "1"` |
-| `ataxia.defences.kaiboost` | `Legacy.Curing.Defs.current.kaiboost` |
-| `ataxia.afflictions.stupidity` | `Legacy.Curing.Affs.stupidity` |
-| `ataxia.settings.paused` | `Legacy.Settings.Curing.status == false` |
-| `ataxiaBasher.enabled` | `Legacy.Settings.Basher.status` |
-| `combatQueue()` | removed; Legacy pre-attack hooks live outside this module |
-| `queue addclear eqbal <cmd>` | `SETALIAS ATK <cmd>` + `QUEUE ADDCLEARFULL EQBAL ATK` |
-| `ataxia_needLockBreak()` / `ataxia_lockBreak()` | module-local monk fitness lock-break |
+| `ataxia.vitals.form` / `.kata` | `charstat("Form")` / `charstat("Kata")` (parse `gmcp.Char.Vitals.charstats`) |
+| `ataxia.afflictions.X` (aeon, stupidity) | `selfAff("X")` → `Legacy.Curing.Affs[X]` |
+| `ataxia.settings.paused` | `isPaused()` → `Legacy.Settings.Curing.status == false` |
+| `ataxia.settings.separator` | `"/"` (hardcoded, joins commands in the SKATK alias) |
+| `ataxia_needLockBreak()` / `ataxia_lockBreak()` | `selfNeedLockBreak()` / `selfLockBreak()` (Monk: stand-if-prone + `fitness`) |
+| `combatQueue()` prefix | removed — Legacy handles pre-attack hooks externally |
+| `send("queue addclear eqbal "..atk)` | `sendAttack(cmd, "EQBAL")` → `SETALIAS SKATK <cmd>` + `QUEUE ADDCLEARFULL EQBAL SKATK` |
+| `send("cq all".. transition)` | k>=5 (clean transition — needs balance but doesn't consume it): `transition to the X form / <target-form combo>` bundled in one EQBAL send. k<5: `adopt X form` alone (adopt consumes balance; combo lands next balance). |
 
-## Tunables
+## Shikudo-specific
 
-Override these after loading the file:
+### Hyperfocus (`ataxiaTemp.hyperLimb`)
+Read live from **`ak.limbs.hyperfocus`** (the limb we currently have hyperfocused) — never
+tracked client-side. `hyperfocus head` is issued only during prep (non-Gaital) when
+`ak.limbs.hyperfocus` isn't already `"head"`; combo 1's sweep emits `hyperfocus none` only
+when the focus is actually on the head. No trigger to wire, nothing to desync.
 
-```lua
-monk.shikudo.CONFIG.affThreshold = 30
-monk.shikudo.CONFIG.godmodePrepThreshold = 92
-monk.shikudo.CONFIG.godmodeHeadPrepThreshold = 86
-monk.shikudo.CONFIG.godmodeLockForkMinAffs = 3
-monk.shikudo.CONFIG.godmodeMaelstromHpThresh = 38
-monk.shikudo.CONFIG.separator = "/"
-monk.shikudo.CONFIG.aliasName = "ATK"
-monk.shikudo.CONFIG.prearmInterval = nil  -- nil uses getNetworkLatency(), fallback 0.1s
-monk.shikudo.CONFIG.debug = true
-```
+### Limb-break percentages (`ataxiaTables.limbData.shikX`)
+A static lookup table `monk.shikudo.limbDamage` (% of a limb break each attack lands), defined
+in `shikudo.lua` and redefined fresh on load (file = source of truth). Damage scales with stats
++ staff artifact, so the values are **measured, not computed**: `calibrate.lua` (`skcal`) fires
+each limb-damaging attack solo, reads the `lb[target].hits` delta, and `skcalshow()` prints a
+paste-ready table to drop over the one in `shikudo.lua`. Seeds are rough (the old Levi formula
+at 5000 health) so it works before calibration. Levi's `shikudo_breakPoint` health formula and
+the `ataxia.shikudoLevel` (staff-artifact) multiplier are **dropped** — calibration captures
+both your stats and your artifact directly. Attack→aff reference (drives the build ladder):
+kuro→weariness+lethargy, ruku→slickness(torso)/healthleech+clumsiness(arms), hiru→dizziness,
+hiraku→anorexia, nervestrike→paralysis, needle→crushedthroat, flashheel→break-leg, frontkick→prone.
 
-`monk.shikudo.limbDamage` contains the static percent damage table used for all
-prep and light/no-light decisions. Recalibrate with `calibrate.lua` if your live
-numbers differ. The calibrator emits a standalone `monk.shikudo.limbDamage = { ... }`
-assignment with the exact lower-case keys read by this module. Missing, zero, or
-negative calibration results are left at the currently loaded/default value with
-an inline comment, so the printed table stays valid Lua.
+---
 
-`calibrate.lua` does not assume you have enough kata for balance-free form
-switching. For each test it queues `adopt <form> form`, waits
-`skCalibrate.formSwitchDelaySeconds` (default `4.1`), snapshots the limb, then
-queues the calibration combo. Increase that delay if your form switch is slower.
+## Dropped (vs Levi godmode)
 
-## Required Mudlet Wiring
-
-The module self-registers nothing. Wire aliases and the balance/equilibrium-used
-trigger by hand:
-
-| Alias | Script |
+| What | Why |
 | --- | --- |
-| `skgodmode` | `skgodmode()` |
-| `skstatus` | `skstatus()` |
-| `skgmstatus` | `skgmstatus()` |
-| `skreset` | `skreset()` |
+| `transmute` (HP→sustain), `kai boost`, `mind lock` (Telepathy) | Lean-offense scope (user choice) — these are self/utility, not the limb kill. |
+| Maelstrom form + `maelstromPrios` + `gm.lowHp` low-HP crescent fork | Lean-offense scope. The form swap never routes to Maelstrom; the low-HP override is gone. |
+| `combatQueue()` prefix; `tCity`/Mhaldor `incapacitate` | House convention (matches tekura/sentinel) — always proceed with `dispatch`. |
+| Dead code the 2026-04-14 review flagged | `gm.staff[1]=="hyperfocus head"` branch (A), the 2nd `=="dispatch"` handler (D), and the never-consumed `hyperNeedsRaise` flag (S2/C) are simply not ported. |
 
-| Trigger | Script |
-| --- | --- |
-| `^(Balance|Equilibrium) used: (\d+\.\d+)s\.$` | `monk.shikudo.on_balance(tonumber(matches[3]))` |
+---
 
-AK must provide target affliction scores, target limb hits, target HP, target
-parry, and hyperfocus state. Legacy must provide self curing settings, self
-afflictions, self defences, and GMCP vitals/charstats.
+## Public API
 
-Telepathy state is optional but recommended:
+`monk.shikudo.*` — data: `CONFIG`, `state`, `limbDamage`.
+`monk.shikudo.*` — functions: `dispatch()` (main entry), `run()`, `status()`, `reset()`,
+`calcLimbs()`, `formswap()`.
+Top-level aliases: `sk`, `skstatus`, `skreset`, `skdebug` (shikudo.lua); `skcal`, `skcalshow`,
+`skcalstop` (calibrate.lua).
 
-```lua
-monk.telepathy.mindlocked = true  -- on successful mind lock
-monk.telepathy.mindlocked = false -- when mind lock drops
-```
+## Tests
 
-Without that trigger state, the module may retry `mind lock <target>` more often.
-
-Hyperfocus is not mirrored locally. AK's `ak.limbs.hyperfocus` is the source of
-truth; the game-side setting persists until `hyperfocus none`. GodMode only sends
-`hyperfocus <limb>` when the target is parrying a limb in the selected combo, and
-sends `hyperfocus none` once the selected combo no longer needs the current focus.
+`shikudo_test.lua` stubs the host globals and asserts the queued SKATK command across the
+per-form build, the 3 execute combos, clean-transition bundling (transition + combo on one
+balance), dispatch, lock fork, parry redirect, shield, hyperfocus, and the no-target / paused
+guards. Run from this folder: `lua shikudo_test.lua`.

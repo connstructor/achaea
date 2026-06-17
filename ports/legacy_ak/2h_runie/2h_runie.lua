@@ -90,7 +90,7 @@ M.state =
     devastate_pending = nil,
     last_fire_time = 0,
   }
--- Note: overwhelm follow-up state lives in ak.didOverwhelm (framework-maintained).
+-- Note: overwhelm follow-up state lives in ak.overwhelmed (framework-maintained).
 -- =============================================================
 -- State read + helpers
 -- =============================================================
@@ -125,7 +125,8 @@ local function read_state()
   -- Target defenses
   -- Parry limb: lowercase, no spaces (e.g., "leftleg", "head", or nil)
   -- Engagement (auto-clears on target switch, so truthy ⇒ engaged on current target)
-  -- OVERWHELM → BRAIN follow-up flag
+  -- Target currently overwhelmed (set by game's OVERWHELM response, self-clears
+  -- in ~6s if we don't BRAIN) → take the BRAIN follow-up
   -- Our state
   return
     {
@@ -142,7 +143,7 @@ local function read_state()
       shield = ak.defs.shield and not ignoreShield,
       targetparry = targetparry,
       engaged = ak.engaged,
-      did_overwhelm = ak.didOverwhelm == true,
+      overwhelmed = ak.overwhelmed == true,
       weapon_mode = M.state.weapon_mode,
     }
 end
@@ -171,7 +172,7 @@ end
 -- =============================================================
 -- Phase selection
 -- =============================================================
--- follow-up BRAIN (OVERWHELM was last batch)
+-- follow-up BRAIN (target is overwhelmed)
 -- target impaled
 -- target prone, not impaled
 -- target ≤ 25% HP
@@ -216,7 +217,7 @@ local function select_phase(state)
     return PHASE.CARVE
   end
   -- 3. BRAIN follow-up (would bounce off rebound, so handled after CARVE)
-  if state.did_overwhelm then
+  if state.overwhelmed then
     return PHASE.PATH_B_BRAIN
   end
   -- 4. New finisher commits
@@ -397,9 +398,13 @@ local function build_batch(state, phase)
   elseif phase == PHASE.PATH_A_DISEMBOWEL then
     add("WIELD " .. cfg.bastard_sword)
     add("DISEMBOWEL " .. state.target)
+    -- FURY rode the impale window; drop it once the chain finishes (same balance).
+    add("FURY OFF")
   elseif phase == PHASE.PATH_A_IMPALE then
     add("WIELD " .. cfg.bastard_sword)
     add("IMPALE " .. state.target)
+    -- Turn FURY on after the impale lands so the disembowel hits boosted (same balance).
+    add("FURY ON")
   elseif phase == PHASE.PATH_C_BISECT then
     add("WIELD " .. cfg.bastard_sword)
     local venom = pick_venom(state)
@@ -559,6 +564,7 @@ local function compute_and_fire()
     phase = auto_phase
   end
   local cmds = build_batch(state, phase)
+  boxEcho.send("FIRE")
   send("SETALIAS TWOHATK " .. table.concat(cmds, "/"))
   send("QUEUE ADDCLEARFULL FREE TWOHATK")
   -- Record fire time so on_balance_used can tell combat balance use from
@@ -577,12 +583,13 @@ end
 
 function M.arm()
   if not is_valid_target(target) then
-    echo("[2H] Not arming: target is '" .. tostring(target) .. "'.\n")
+    boxEcho.send("[2H] Not arming: target is '" .. tostring(target) .. "'.")
     return
   end
   if on_eqbal() then
     compute_and_fire()
   else
+    boxEcho.send("ARMED")
     M.state.armed = true
   end
 end
@@ -806,4 +813,4 @@ end
 -- All aliases, keys, and event handlers are configured as permanent objects in
 -- the Mudlet UI (see project README / setup notes). The script provides only
 -- the engine logic and namespace; UI objects call into runewarden.twoh.*.
-echo("[2H] Combat engine loaded.\n")
+boxEcho.send("[2H] Combat engine loaded.")

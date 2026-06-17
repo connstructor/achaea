@@ -1,258 +1,211 @@
 --[[
 ================================================================================
-SHIKUDO LIMB DAMAGE CALIBRATOR
+SHIKUDO LIMB-DAMAGE CALIBRATOR
 ================================================================================
+Limb damage scales with your stats + staff artifact, so monk.shikudo.limbDamage
+must be MEASURED, not guessed. This fires each limb-damaging Shikudo attack solo,
+reads the delta from lb[target].hits, and records it. The attacks live in
+different forms, so run it once per form (it only fires the attacks available in
+your CURRENT form), then paste skcalshow()'s output over the table in shikudo.lua.
 
-Fires every unique Shikudo limb-damage attack once at the current target,
-measures the delta in lb[target].hits[limb], and prints a paste-ready table
-for monk.shikudo.limbDamage.
+  flashheel   -> leg    (Willow, Gaital)
+  kuro        -> leg    (Rain, Oak, Gaital)
+  frontkick   -> arm    (Rain)
+  ruku        -> arm    (Rain, Oak, Gaital, Maelstrom)
+  risingkick  -> head   (Tykonos, Oak, Maelstrom)
+  nervestrike -> head   (Oak)
+  hiru        -> head   (Willow, Rain)
+  hiraku      -> head   (Willow)
+  needle      -> head   (Gaital)
 
 USAGE:
-  tar <some-burly-mob-or-sparring-partner>
-  lua skcal()           -- start
-  lua skcalshow()       -- reprint last results
-  lua skcalstop()       -- abort mid-run
+  tar <a sturdy sparring partner / mob>   -- fresh, limbs near 0%
+  <adopt a form> ; skcal()                -- measures that form's attacks
+  <adopt next form> ; skcal()             -- repeat across Willow / Rain / Oak / Gaital
+  skcalshow()                             -- print a paste-ready limbDamage table
+  skcalstop()                             -- abort a run
 
-WHAT IT DOES:
-  1. Clears hyperfocus (so values aren't halved).
-  2. For each test: adopt form, wait for the form-switch balance
-     (default 4.1s), snapshot limb damage, fire `combo target <attack>`,
-     wait 5s, read lb damage delta.
-  3. Prints a Lua table at the end you can paste over the existing
-     monk.shikudo.limbDamage definition.
+To cover all 9: Willow (flashheel, hiru, hiraku), Rain (kuro, ruku, frontkick),
+Oak (nervestrike, risingkick), Gaital (needle).
 
 NOTES:
-  - Pick a target that won't die or fight back. Damage will accumulate
-    across the run — that's fine, we measure deltas.
-  - Spinkick is omitted (it requires prone). The dispatch system uses
-    the historical 27% value for prone-head; calibrate manually if
-    you want a precise number (sweep first, then spinkick).
-  - If an attack is parried/missed/healed, its delta will be 0 or
-    negative. Re-run that one manually with `skcal` after fixing.
+  - Sends `hyperfocus none` first: hyperfocus HALVES damage to the focused limb,
+    which would skew the head numbers. The engine's break math assumes UNFOCUSED
+    damage, so that's what we measure.
+  - Reads lb[target].hits directly. Re-target / use a fresh limb between forms so
+    nothing is already near 100% (a broken limb stops registering new damage).
 ================================================================================
-]]--
+]]
+--
 
-skCalibrate = skCalibrate or {}
+skCal = skCal or {}
 
--- {form, full attack command, name-for-table-key, limb-where-damage-lands}
-skCalibrate.tests = {
-  -- Tykonos
-  {"Tykonos",   "thrust right arm",   "thrust",       "right arm"},
-  {"Tykonos",   "risingkick head",    "risingkick",   "head"},
-  -- Willow
-  {"Willow",    "hiru",               "hiru",         "head"},
-  {"Willow",    "hiraku",             "hiraku",       "head"},
-  {"Willow",    "dart torso",         "dart",         "torso"},
-  {"Willow",    "flashheel right",    "flashheel",    "right leg"},
-  -- Rain
-  {"Rain",      "kuro right",         "kuro",         "right leg"},
-  {"Rain",      "ruku torso",         "ruku",         "torso"},
-  {"Rain",      "frontkick right",    "frontkick",    "right arm"},
-  -- Oak
-  {"Oak",       "nervestrike",        "nervestrike",  "head"},
-  {"Oak",       "livestrike",         "livestrike",   "torso"},
-  -- Gaital
-  {"Gaital",    "needle",             "needle",       "head"},
-  {"Gaital",    "jinzuku",            "jinzuku",      "torso"},
+-- {key, combo command (%t = target), limb measured, set of forms where available}
+skCal.tests = {
+	{ "flashheel", "combo %t flashheel left", "left leg", { Willow = true, Gaital = true } },
+	{ "kuro", "combo %t kuro left", "left leg", { Rain = true, Oak = true, Gaital = true } },
+	{ "frontkick", "combo %t frontkick left", "left arm", { Rain = true } },
+	{
+		"ruku",
+		"combo %t ruku left",
+		"left arm",
+		{ Rain = true, Oak = true, Gaital = true, Maelstrom = true },
+	},
+	{ "risingkick", "combo %t risingkick head", "head", { Tykonos = true, Oak = true, Maelstrom = true } },
+	{ "nervestrike", "combo %t nervestrike", "head", { Oak = true } },
+	{ "hiru", "combo %t hiru", "head", { Willow = true, Rain = true } },
+	{ "hiraku", "combo %t hiraku", "head", { Willow = true } },
+	{ "needle", "combo %t needle", "head", { Gaital = true } },
 }
 
-skCalibrate.formSwitchDelaySeconds = skCalibrate.formSwitchDelaySeconds or 4.1
-skCalibrate.delaySeconds = skCalibrate.delaySeconds or 5  -- after each combo; bump if your eq is slow
+skCal.keyOrder = { "flashheel", "kuro", "frontkick", "ruku", "risingkick", "nervestrike", "hiru", "hiraku", "needle" }
+skCal.delaySeconds = 3 -- between attacks; bump if your balance is slow
 
-skCalibrate.defaultDamage = skCalibrate.defaultDamage or {
-  flashheel = 9.2,
-  frontkick = 9.2,
-  risingkick = 9.2,
-  spinkick = 27.0,
+skCal.results = skCal.results or {} -- results[key] = delta %, persists across per-form runs
+skCal.queue = {}
+skCal.idx = 0
+skCal.running = false
+skCal._timer = nil
+skCal._tgt = nil
+skCal._cur = nil
+skCal._before = 0
 
-  kuro = 9.2,
-  ruku = 9.2,
-  thrust = 14.5,
-  needle = 14.6,
-  nervestrike = 13.4,
-  livestrike = 13.4,
-  hiru = 9.4,
-  hiraku = 9.4,
-  dart = 7.3,
-  jinzuku = 9.2,
-}
+local function calForm()
+	local cs = gmcp and gmcp.Char and gmcp.Char.Vitals and gmcp.Char.Vitals.charstats
+	if not cs then
+		return nil
+	end
+	for _, entry in ipairs(cs) do
+		local v = tostring(entry):match("^Form: (.+)$")
+		if v then
+			return (v:gsub("%s+$", ""))
+		end
+	end
+	return nil
+end
 
-skCalibrate.outputOrder = {
-  kicks = {"flashheel", "frontkick", "risingkick", "spinkick"},
-  staff = {"kuro", "ruku", "thrust", "needle", "nervestrike",
-           "livestrike", "hiru", "hiraku", "dart", "jinzuku"}
-}
-
--- ── runtime state ────────────────────────────────────────────
-skCalibrate.idx     = 0
-skCalibrate.results = {}
-skCalibrate.running = false
-skCalibrate._timer  = nil
-skCalibrate._tgt    = nil
-skCalibrate._before = 0
-skCalibrate._cur    = nil
-
--- ── helpers ──────────────────────────────────────────────────
 local function readLimb(limb)
-  if not skCalibrate._tgt or not lb or not lb[skCalibrate._tgt]
-  or not lb[skCalibrate._tgt].hits then
-    return 0
-  end
-  return lb[skCalibrate._tgt].hits[limb] or 0
+	if not limb or not skCal._tgt or not lb or not lb[skCal._tgt] or not lb[skCal._tgt].hits then
+		return 0
+	end
+	return lb[skCal._tgt].hits[limb] or 0
 end
 
-local function sendAtk(stack, queueType)
-  send("SETALIAS ATK " .. stack)
-  send("QUEUE ADDCLEARFULL " .. (queueType or "FREE") .. " ATK")
-end
-
-local function loadedDamage(name)
-  local tableRef = monk and monk.shikudo and monk.shikudo.limbDamage
-  local value = tableRef and tableRef[name]
-  if type(value) == "number" then return value end
-  return skCalibrate.defaultDamage[name]
-end
-
-local function outputDamage(name)
-  local result = skCalibrate.results[name]
-  if type(result) == "number" and result > 0 then
-    return result, ""
-  end
-
-  local fallback = loadedDamage(name) or 0
-  if result == nil then
-    return fallback, " -- unchanged; no calibration result"
-  end
-  return fallback, " -- unchanged; invalid calibration result was " .. string.format("%.1f", result)
-end
-
-local function printDamageLine(name)
-  local value, note = outputDamage(name)
-  cecho(string.format("\n  %-12s = %.1f,%s", name, value, note))
-end
-
--- ── core ─────────────────────────────────────────────────────
-local recordAndNext
-
-local function fireCombo()
-  if not skCalibrate.running or not skCalibrate._cur then return end
-
-  local cur = skCalibrate._cur
-  skCalibrate._before = readLimb(cur.limb)
-
-  cecho(string.format(
-    "\n<yellow>[skCal %d/%d] %s | combo %s %s -> %s (before: %.2f%%)",
-    skCalibrate.idx, #skCalibrate.tests, cur.form,
-    skCalibrate._tgt, cur.cmd, cur.limb, skCalibrate._before))
-
-  sendAtk("combo " .. skCalibrate._tgt .. " " .. cur.cmd, "FREE")
-  skCalibrate._timer = tempTimer(skCalibrate.delaySeconds, recordAndNext)
+local function sendAtk(stack)
+	send("SETALIAS SKCAL " .. stack)
+	send("QUEUE ADDCLEARFULL EQBAL SKCAL")
 end
 
 local function fireTest(t)
-  local form, cmd, name, limb = t[1], t[2], t[3], t[4]
-  skCalibrate._cur = {form = form, cmd = cmd, name = name, limb = limb}
-
-  cecho(string.format(
-    "\n<yellow>[skCal %d/%d] switching to %s; firing %s in %.1fs",
-    skCalibrate.idx, #skCalibrate.tests, form, cmd,
-    skCalibrate.formSwitchDelaySeconds))
-
-  -- Always adopt and wait; without enough kata, form switching costs balance.
-  sendAtk("adopt " .. form .. " form", "EQBAL")
-  skCalibrate._timer = tempTimer(skCalibrate.formSwitchDelaySeconds, fireCombo)
+	skCal._cur = t
+	skCal._before = readLimb(t[3])
+	local cmd = t[2]:gsub("%%t", skCal._tgt)
+	cecho(
+		string.format("\n<yellow>[skcal %d/%d] %s  (%s now %.2f%%)", skCal.idx, #skCal.queue, cmd, t[3], skCal._before)
+	)
+	sendAtk(cmd)
 end
 
-recordAndNext = function()
-  if not skCalibrate.running then return end
+local function recordAndNext()
+	if not skCal.running then
+		return
+	end
 
-  -- Snapshot previous test
-  if skCalibrate._cur then
-    local after = readLimb(skCalibrate._cur.limb)
-    local delta = after - skCalibrate._before
-    skCalibrate.results[skCalibrate._cur.name] = delta
-    local color = (delta > 0) and "<green>" or "<red>"
-    cecho(string.format(
-      "\n" .. color .. "[skCal %s] delta %+.2f%% (after: %.2f%%)",
-      skCalibrate._cur.name, delta, after))
-  end
+	if skCal._cur then
+		local key, limb = skCal._cur[1], skCal._cur[3]
+		local delta = readLimb(limb) - skCal._before
+		skCal.results[key] = delta
+		cecho(string.format("\n<green>[skcal] %-11s %+.2f%%  (%s)", key, delta, limb))
+	end
 
-  -- Next, or finish
-  skCalibrate.idx = skCalibrate.idx + 1
-  local t = skCalibrate.tests[skCalibrate.idx]
-  if not t then
-    skCalibrate.running = false
-    skCalibrate.show()
-    return
-  end
-
-  fireTest(t)
+	skCal.idx = skCal.idx + 1
+	local t = skCal.queue[skCal.idx]
+	if not t then
+		skCal.running = false
+		cecho("\n<cyan>[skcal] done. Switch form + skcal() again, or skcalshow() to print.")
+		return
+	end
+	fireTest(t)
+	skCal._timer = tempTimer(skCal.delaySeconds, recordAndNext)
 end
 
--- ── public API ───────────────────────────────────────────────
-function skCalibrate.run()
-  if not target or target == "" then
-    cecho("\n<red>[skCal] No target set. Use: tar <name>")
-    return
-  end
-  if skCalibrate.running then
-    cecho("\n<red>[skCal] Already running. skcalstop() first.")
-    return
-  end
+function skCal.run()
+	if not target or target == "" then
+		cecho("\n<red>[skcal] No target set. Use: tar <name>")
+		return
+	end
+	if skCal.running then
+		cecho("\n<red>[skcal] Already running. skcalstop() first.")
+		return
+	end
+	local form = calForm()
+	if not form then
+		cecho("\n<red>[skcal] Can't read your Form from gmcp charstats — adopt a form first.")
+		return
+	end
 
-  skCalibrate._tgt    = target
-  skCalibrate.idx     = 0
-  skCalibrate.results = {}
-  skCalibrate._cur    = nil
-  skCalibrate.running = true
+	-- Only the attacks available in the current form.
+	skCal.queue = {}
+	for _, t in ipairs(skCal.tests) do
+		if t[4][form] then
+			skCal.queue[#skCal.queue + 1] = t
+		end
+	end
+	if #skCal.queue == 0 then
+		cecho(
+			"\n<yellow>[skcal] No measurable attacks in <cyan>" .. form .. "<yellow>. Try Willow / Rain / Oak / Gaital."
+		)
+		return
+	end
 
-  cecho(string.format(
-    "\n<cyan>[skCal] %d tests, %.1fs form delay, %ds hit delay, target = <yellow>%s",
-    #skCalibrate.tests, skCalibrate.formSwitchDelaySeconds,
-    skCalibrate.delaySeconds, skCalibrate._tgt))
-  cecho("\n<cyan>[skCal] Clearing hyperfocus...")
+	skCal._tgt = target
+	skCal.idx = 0
+	skCal._cur = nil
+	skCal.running = true
 
-  -- Clear hyperfocus so damage isn't halved on the focused limb.
-  send("hyperfocus none")
-
-  -- Small startup delay so hyperfocus-none lands before the first attack.
-  skCalibrate._timer = tempTimer(2, recordAndNext)
+	send("hyperfocus none") -- measure UNFOCUSED damage (hyperfocus halves the focused limb)
+	cecho(
+		string.format(
+			"\n<cyan>[skcal] %d attack(s) in <yellow>%s<cyan>, %ds apart, target = <yellow>%s",
+			#skCal.queue,
+			form,
+			skCal.delaySeconds,
+			skCal._tgt
+		)
+	)
+	recordAndNext() -- fires the first test (nothing to record yet)
 end
 
-function skCalibrate.stop()
-  skCalibrate.running = false
-  if skCalibrate._timer then
-    killTimer(skCalibrate._timer)
-    skCalibrate._timer = nil
-  end
-  cecho("\n<cyan>[skCal] Stopped at test " .. skCalibrate.idx .. "/" .. #skCalibrate.tests)
+function skCal.stop()
+	skCal.running = false
+	if skCal._timer then
+		killTimer(skCal._timer)
+		skCal._timer = nil
+	end
+	cecho("\n<cyan>[skcal] Stopped at " .. skCal.idx .. "/" .. #skCal.queue)
 end
 
-function skCalibrate.show()
-  cecho("\n<cyan>====================================================")
-  cecho("\n<cyan>  Shikudo limb damage — paste into monk.shikudo.limbDamage")
-  cecho("\n<cyan>====================================================")
-  cecho("\nmonk = monk or {}")
-  cecho("\nmonk.shikudo = monk.shikudo or {}")
-  cecho("\nmonk.shikudo.limbDamage = {")
-  cecho("\n  -- Kicks")
-  for _, name in ipairs(skCalibrate.outputOrder.kicks) do
-    if name == "spinkick" then
-      local value = loadedDamage(name) or 27.0
-      cecho(string.format("\n  %-12s = %.1f, -- unchanged; requires prone/manual calibration", name, value))
-    else
-      printDamageLine(name)
-    end
-  end
-  cecho("\n  -- Staff strikes")
-  for _, name in ipairs(skCalibrate.outputOrder.staff) do
-    printDamageLine(name)
-  end
-  cecho("\n}")
-  cecho("\n")
+function skCal.show()
+	cecho("\n<cyan>-- Paste over the mod.limbDamage table in shikudo.lua. Measured attacks use")
+	cecho("\n<cyan>-- this session's deltas; the rest keep their current value.")
+	cecho("\n<white>mod.limbDamage = {")
+	local live = (monk and monk.shikudo and monk.shikudo.limbDamage) or {}
+	for _, key in ipairs(skCal.keyOrder) do
+		local measured = skCal.results[key]
+		local v = measured or live[key] or 0
+		local note = measured and "" or "   -- not measured this session"
+		cecho(string.format("\n<white>    %-11s = %5.2f,%s", key, v, note))
+	end
+	cecho("\n<white>}\n")
 end
 
--- ── top-level aliases (typeable from the input line) ────────
-function skcal()      skCalibrate.run()  end
-function skcalshow()  skCalibrate.show() end
-function skcalstop()  skCalibrate.stop() end
+-- top-level aliases (typeable from the input line)
+function skcal()
+	skCal.run()
+end
+function skcalshow()
+	skCal.show()
+end
+function skcalstop()
+	skCal.stop()
+end
