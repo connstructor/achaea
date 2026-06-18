@@ -26,12 +26,12 @@ records the design decisions.
   **current** state and disarms (one shot per arm). This replaces the old
   `attackInFlight` latch + GMCP `Char.Vitals` handler entirely.
 - **State-driven brokenstar.** Reads framework state each tick instead of running
-  a trigger-fed machine: `affstrack.impale == "Me"` (impaled), `ak.bleeding`
-  (bleed), `lb`/`affstrack` (limbs/prone). The kill is one string,
-  `withdraw blade/sheathe sword/brokenstar`. A target writhe needs no handling —
-  AK flips impale off and the cascade re-impales. The only script latch is
-  `impaleslash` (self-clearing after `CONFIG.IMPALESLASH_LATCH`, mirroring Levi's
-  `timpaleslash`); it also guards brokenstar against stale `ak.bleeding`.
+  a trigger-fed machine: `affstrack.impale == "Me"` (impaled),
+  `affstrack.score.impaleslash == 100` (slashed), `ak.bleeding` (bleed), `lb`/`affstrack`
+  (limbs/prone). The kill is one string, `withdraw blade/sheathe sword/brokenstar`. A
+  target writhe needs no handling — AK flips impale off and the cascade re-impales. So the
+  whole route needs **no custom triggers**; the impaleslash gate also guards brokenstar
+  against stale `ak.bleeding`.
 
 State eliminated vs. the prior port: `attackInFlight`, the GMCP balance handler,
 `isImpaled` / `withdrawDone` / `secondImpale` / `bladetwistCount`, the prone
@@ -46,12 +46,14 @@ timer, and the two ASCII status panels. ~2226 → ~710 lines.
 | --- | --- | --- |
 | `tAffs.X` / `haveAff("X")` | target afflictions | `has("X")` → `affstrack.score[X] >= CONFIG.AFF_THRESHOLD` |
 | `tAffs.impaled` | brokenstar chain | `affstrack.impale == "Me"` (`impaled()`) |
+| `timpaleslash` | brokenstar gate | `affstrack.score.impaleslash >= 100` (`impaleslashed()`) — AK tracks it; no trigger/latch |
+| `lastHamstringTime` (timestamp) | re-hamstring gate | `affstrack.score.hamstring >= 100` (`hamstrung()`) — AK tracks it; no timestamp |
 | `tAffs.bleed` | brokenstar trigger / kill | `ak.bleeding` (`bleed()`); refreshed by the `discern` ridealong |
 | `lb[target].hits[limb]` | limb damage % (spaced keys) | **same**, raw `target` key |
 | `tparrying` / `ataxiaTemp.parriedLimb` | focus / airfist | `targetparry` (no-space) → normalised to spaced via `PARRY_SPACED` |
 | `tmounted` | dismount-before-break | `ak.mounted` |
 | `ataxiaTemp.targetHP` | display | `ak.currenthealth / ak.maxhealth` (`target_hp()`) |
-| `ataxiaTables.limbData.bmSlash/bmOffSlash/bmCompass` | prep/break prediction | `blademaster.CONFIG.DMG[form]` — **static**, keyed on `Legacy.Tannivh.form` |
+| `ataxiaTables.limbData.bmSlash/bmOffSlash/bmCompass` | prep/break prediction | `blademaster.CONFIG.DMG[stance]` — **static**, keyed on `Legacy.Tannivh.stance` |
 
 ### Self state (Legacy)
 | Levi symbol | Used for | Legacy equivalent |
@@ -77,9 +79,7 @@ timer, and the two ASCII status panels. ~2226 → ~710 lines.
 | `arm(mode)` | the arming aliases (`bm*`) — the normal entry point |
 | `on_recover(interval)` | the REQUIRED balance/eq-used trigger |
 | `dispatch(mode)` | direct fire (arm uses it internally) |
-| `set_mode(mode)` / `reset()` | mode switch without firing / clear armed+latch state |
-| `on_impaleslash()` | REQUIRED brokenstar trigger |
-| `on_hamstring()` | recommended hamstring trigger |
+| `set_mode(mode)` / `reset()` | mode switch without firing / clear armed state |
 | `debug_snapshot()` | introspection (table); `bmstatus` prints a one-liner |
 | `CONFIG` / `state` | tunables / runtime state |
 
@@ -93,9 +93,9 @@ Top-level alias handlers: `bm`, `bmd`, `bmdq`, `bmbs`, `bmgroup`, `bmreset`,
 - **`affstrack.impale == "Me"`** is the impaled read (per `2h_runie`). If your AK
   build exposes impale differently, override `impaled()`.
 - **`ak.mounted`** assumes AK tracks a mount flag (dismount-before-break logic). 
-- **`Legacy.Tannivh.form`** is expected to return a stance name; `CONFIG.DMG` is keyed
+- **`Legacy.Tannivh.stance`** is expected to return a stance name; `CONFIG.DMG` is keyed
   `doya/thyr/mir/arash/sanya` (lookup is lowercased). If it returns something else,
-  rename the `CONFIG.DMG` keys to match (unknown/nil → `CONFIG.DEFAULT_FORM`).
+  rename the `CONFIG.DMG` keys to match (unknown/nil → `CONFIG.DEFAULT_STANCE`).
 - **Aff names** `"airfisted"`, `"prone"`, etc. assume those `affstrack.score` keys
   (005 checks `"airfisted"`; verify your AK build uses the same).
 - **`CONFIG.AFF_THRESHOLD = 33`** matches the prior port; siblings use 30.

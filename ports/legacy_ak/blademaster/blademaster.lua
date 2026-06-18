@@ -10,10 +10,10 @@
 ---   * JIT dispatch — the alias ARMS (blademaster.arm); a balance/eq-USED trigger calls
 ---     blademaster.on_recover(interval), which schedules the attack for the instant balance
 ---     returns, built from CURRENT state. Replaces the old attackInFlight + GMCP handler.
----   * Brokenstar reads framework state — affstrack.impale=="Me" (impaled) and ak.bleeding —
----     instead of a trigger-driven isImpaled/withdraw/twist-count machine. The only script
----     latch is `impaleslash` (self-clearing after CONFIG.IMPALESLASH_LATCH s, mirroring Levi's
----     timpaleslash). Target writhe needs no handling: AK flips impale off, the cascade re-impales.
+---   * Brokenstar reads framework state — affstrack.impale=="Me" (impaled),
+---     affstrack.score.impaleslash (slashed), and ak.bleeding — instead of a trigger-driven
+---     isImpaled/impaleslashDone/withdraw/twist-count machine, so it needs NO custom triggers.
+---     Target writhe needs no handling: AK flips impale off, the cascade re-impales.
 ---   * Self-registers NOTHING — no tempAlias / tempRegexTrigger / event handler. Wire the
 ---     aliases/triggers by hand to the exposed functions per MUDLET_SETUP.md.
 ---
@@ -29,12 +29,10 @@ blademaster.CONFIG = blademaster.CONFIG or {
   PREP               = 90,          -- limb % considered "prepped"
   BREAK              = 100,         -- limb % considered "broken"
   BLEED_KILL         = 700,         -- ak.bleeding required for brokenstar
-  HAMSTRING_TIME     = 10,          -- re-apply hamstring after N seconds
   AIRFIST_SHIN       = 25,          -- 20 shin + 5 infuse
-  IMPALESLASH_LATCH  = 29,          -- self-clearing impaleslash window (Levi: 29s)
   LOCKBREAK_COOLDOWN = 1.5,         -- seconds between self-lockbreak attempts
   PREARM_LEAD        = nil,         -- on_recover lead; nil = getNetworkLatency()
-  DEFAULT_FORM       = "thyr",      -- fallback when Legacy.Tannivh.form is unknown/nil
+  DEFAULT_STANCE     = "thyr",      -- fallback when Legacy.Tannivh.stance is unknown/nil
   QUEUE              = "FREESTAND",
   ATK_ALIAS          = "ATK",
   ENGAGE_ON_FIRST    = true,
@@ -66,9 +64,9 @@ blademaster.CONFIG.LOCK = blademaster.CONFIG.LOCK or {
 blademaster.CONFIG.LOCK_STRIKE  = { paralyse="neck", weariness="shoulder", plague="eyes", stupid="temple", reckless="groin" }
 blademaster.CONFIG.LOCK_AFFNAME = { paralyse="paralysis", weariness="weariness", plague="plague", stupid="stupidity", reckless="recklessness" }
 
--- Per-form (TwoArts stance) slash damage — primary/secondary per hit. STATIC, selected by
--- Legacy.Tannivh.form. Seeds are the Levi baseline (guesses); set real numbers per form by
--- hand or via calibrate.lua. Unknown/nil form falls back to CONFIG.DEFAULT_FORM.
+-- Per-stance (TwoArts) slash damage — primary/secondary per hit. STATIC, selected by
+-- Legacy.Tannivh.stance. Seeds are the Levi baseline (guesses); set real numbers per stance
+-- by hand or via calibrate.lua. Unknown/nil stance falls back to CONFIG.DEFAULT_STANCE.
 blademaster.CONFIG.DMG = blademaster.CONFIG.DMG or {
   doya  = { legP = 17.3, legS = 11.5, armP = 17.3, armS = 11.5, torso = 18.1, head = 12.1, compass = 14.9 },
   thyr  = { legP = 17.3, legS = 11.5, armP = 17.3, armS = 11.5, torso = 18.1, head = 12.1, compass = 14.9 },
@@ -134,6 +132,10 @@ local function bleed() return tonumber(ak and ak.bleeding) or 0 end
 -- affstrack.impale holds who is impaling; "Me" means the target is impaled by us.
 local function impaled() return affstrack and affstrack.impale == "Me" or false end
 
+-- AK tracks impaleslash as a condition: score hits 100 once it lands (drops when cured).
+local function impaleslashed() return aff_score("impaleslash") >= 100 end
+local function hamstrung()     return aff_score("hamstring") >= 100 end
+
 local function has_shield()     return ak and ak.defs and ak.defs.shield and true or false end
 local function has_rebounding() return ak and ak.defs and ak.defs.rebounding and true or false end
 local function mounted()        return ak and ak.mounted and true or false end
@@ -170,14 +172,14 @@ local function centreslash_dir()
 end
 
 --------------------------------------------------------------------------------
--- PREP / BREAK PREDICTION (wouldBreak guards; per-form slash damage)
+-- PREP / BREAK PREDICTION (wouldBreak guards; per-stance slash damage)
 --------------------------------------------------------------------------------
 
--- Static per-form slash damage, selected by Legacy.Tannivh.form (TwoArts stance).
-local function form_dmg()
-  local f = Legacy and Legacy.Tannivh and Legacy.Tannivh.form
-  f = type(f) == "string" and f:lower() or nil
-  return C.DMG[f] or C.DMG[C.DEFAULT_FORM]
+-- Static per-stance slash damage, selected by Legacy.Tannivh.stance.
+local function stance_dmg()
+  local s = Legacy and Legacy.Tannivh and Legacy.Tannivh.stance
+  s = type(s) == "string" and s:lower() or nil
+  return C.DMG[s] or C.DMG[C.DEFAULT_STANCE]
 end
 
 -- Effectively prepped: at PREP, or a single primary hit would break it.
@@ -197,16 +199,16 @@ local function pair_will_reach(left_limb, right_limb, prim, sec, thresh, focus)
   return (R + prim >= thresh) and (L + sec >= thresh)
 end
 
-local function legs_prepped()         return pair_prepped("left leg", "right leg", form_dmg().legP) end
-local function arms_prepped()         return pair_prepped("left arm", "right arm", form_dmg().armP) end
-local function will_prep_both_legs()  return pair_will_reach("left leg", "right leg", form_dmg().legP, form_dmg().legS, C.PREP,  focus_leg()) end
-local function will_break_both_legs() return pair_will_reach("left leg", "right leg", form_dmg().legP, form_dmg().legS, C.BREAK, focus_leg()) end
-local function will_prep_both_arms()  return pair_will_reach("left arm", "right arm", form_dmg().armP, form_dmg().armS, C.PREP,  focus_arm()) end
+local function legs_prepped()         return pair_prepped("left leg", "right leg", stance_dmg().legP) end
+local function arms_prepped()         return pair_prepped("left arm", "right arm", stance_dmg().armP) end
+local function will_prep_both_legs()  return pair_will_reach("left leg", "right leg", stance_dmg().legP, stance_dmg().legS, C.PREP,  focus_leg()) end
+local function will_break_both_legs() return pair_will_reach("left leg", "right leg", stance_dmg().legP, stance_dmg().legS, C.BREAK, focus_leg()) end
+local function will_prep_both_arms()  return pair_will_reach("left arm", "right arm", stance_dmg().armP, stance_dmg().armS, C.PREP,  focus_arm()) end
 
 -- Upper uses torso=primary, head=secondary, with the lower limb taking primary.
 local function will_prep_upper()
   local t, h = limb_dmg("torso"), limb_dmg("head")
-  local p, s = form_dmg().torso, form_dmg().head
+  local p, s = stance_dmg().torso, stance_dmg().head
   if t >= C.PREP and h >= C.PREP then return false end
   if h <= t then return (h + p >= C.PREP) and (t + s >= C.PREP) end
   return (t + p >= C.PREP) and (h + s >= C.PREP)
@@ -214,7 +216,7 @@ end
 
 local function will_break_upper()
   local t, h = limb_dmg("torso"), limb_dmg("head")
-  local p, s = form_dmg().torso, form_dmg().head
+  local p, s = stance_dmg().torso, stance_dmg().head
   if h <= t then return (h + p >= C.BREAK) and (t + s >= C.BREAK) end
   return (t + p >= C.BREAK) and (h + s >= C.BREAK)
 end
@@ -225,8 +227,7 @@ end
 
 -- Lightning prep: lightning already gives clumsiness, so layer the rest.
 local function prep_strike()
-  local expired = (os.time() - (blademaster.state.hamstring_time or 0)) >= C.HAMSTRING_TIME
-  if not has("hamstring") or expired then return "hamstring" end
+  if not hamstrung() then return "hamstring" end
   if not has("paralysis")    then return "neck" end
   if not has("hypochondria") then return "chest" end
   if not has("weariness")    then return "shoulder" end
@@ -341,18 +342,42 @@ local function send_attack(combo)
   send_commands(precommands() .. combo)
 end
 
-local function clear_impaleslash_latch()
-  blademaster.state.impaleslash_latch = false
-  if blademaster.state.impaleslash_timer then
-    killTimer(blademaster.state.impaleslash_timer)
-    blademaster.state.impaleslash_timer = nil
-  end
-end
-
 --------------------------------------------------------------------------------
 -- STRATEGY 1: DOUBLE-PREP (legs only)
 --   leg_prep (lightning) -> leg_break + KNEES (ice) -> mangle: legslash RIGHT + STERNUM (ice)
 --------------------------------------------------------------------------------
+
+-- COMPASSSLASH single-limb prep correction (COMPASSSLASH <t> <direction>; one limb each):
+--   N=head  S=torso  E=left arm  W=right arm  SE=left leg  SW=right leg
+-- A normal slash hits the focus limb (primary) AND the off limb (secondary). When the off
+-- limb is high enough that the secondary would break it before the focus limb is prepped,
+-- compassslash the focus limb alone instead, so prep stays balanced for a clean double-break.
+local COMPASS_DIR = {
+  ["left leg"] = "southeast", ["right leg"] = "southwest",
+  ["left arm"] = "east",      ["right arm"] = "west",
+  head = "north",             torso = "south",
+}
+
+-- Paired-limb prep (legs/arms): compassslash the focus limb if the paired slash's secondary
+-- would break the off limb; otherwise the normal paired slash on the focus side.
+local function prep_slash(verb, left_limb, right_limb, side, secondary)
+  local off = (side == "left") and right_limb or left_limb
+  if limb_dmg(off) + secondary >= C.BREAK then
+    return "compassslash " .. target .. " " .. COMPASS_DIR[(side == "left") and left_limb or right_limb]
+  end
+  return verb .. " " .. target .. " " .. side
+end
+
+-- Upper prep (torso/head via centreslash): compassslash the lower limb if centreslash's
+-- secondary would break the higher one; otherwise the normal centreslash.
+local function prep_upper()
+  local lower  = (limb_dmg("head") <= limb_dmg("torso")) and "head" or "torso"
+  local higher = (lower == "head") and "torso" or "head"
+  if limb_dmg(higher) + stance_dmg().head >= C.BREAK then
+    return "compassslash " .. target .. " " .. COMPASS_DIR[lower]
+  end
+  return "centreslash " .. target .. " " .. centreslash_dir()
+end
 
 local function build_double()
   local phase
@@ -363,7 +388,7 @@ local function build_double()
   local strike
   if phase == "mangle" then strike = "sternum"
   elseif phase == "leg_break" then strike = "knees"
-  elseif mounted() and has("hamstring") and will_prep_both_legs() then strike = "knees" -- dismount before break
+  elseif mounted() and hamstrung() and will_prep_both_legs() then strike = "knees" -- dismount before break
   else strike = prep_strike() end
 
   -- Ice for break/mangle and the final prep hit (strips caloric); lightning otherwise.
@@ -381,10 +406,11 @@ local function build_double()
     return "airfist " .. target .. "/assess " .. target
   end
 
-  local dir
-  if phase == "mangle" then dir = (limb_dmg("right leg") < 200) and "right" or "left"
-  else dir = focus_leg() end
+  if phase == "leg_prep" then
+    return infuse(kind) .. prep_slash("legslash", "left leg", "right leg", focus_leg(), stance_dmg().legS) .. " " .. strike .. "/assess " .. target
+  end
 
+  local dir = (phase == "mangle") and ((limb_dmg("right leg") < 200) and "right" or "left") or focus_leg()
   return infuse(kind) .. "legslash " .. target .. " " .. dir .. " " .. strike .. "/assess " .. target
 end
 
@@ -436,8 +462,8 @@ local function build_quad()
   elseif phase == "leg_prep" and will_prep_both_legs() then kind = "ice" end
 
   local cmd
-  if phase == "arm_prep"  then cmd = "armslash " .. target .. " " .. focus_arm()
-  elseif phase == "leg_prep"  then cmd = "legslash " .. target .. " " .. focus_leg()
+  if phase == "arm_prep"  then cmd = prep_slash("armslash", "left arm", "right arm", focus_arm(), stance_dmg().armS)
+  elseif phase == "leg_prep"  then cmd = prep_slash("legslash", "left leg", "right leg", focus_leg(), stance_dmg().legS)
   elseif phase == "arm_break" then cmd = "armslash " .. target .. " " .. focus_arm()
   else cmd = "legslash " .. target .. " right" end -- leg_break / mangle: RIGHT (curing applies left first)
 
@@ -451,12 +477,12 @@ end
 --------------------------------------------------------------------------------
 
 local function build_brokenstar()
-  local slashed     = blademaster.state.impaleslash_latch or false
-  local bleed_ready = slashed and bleed() >= C.BLEED_KILL   -- latch guards against stale bleed
+  local slashed     = impaleslashed()
+  local bleed_ready = slashed and bleed() >= C.BLEED_KILL   -- impaleslash gate guards stale bleed
 
-  -- Execute / impale chain (framework state, one latch). Checked before the
-  -- shield/raze guard below: shield bounces slashes, but never the bleed kill or
-  -- an in-progress impale, so we don't waste the window razing here.
+  -- Execute / impale chain (all framework state). Checked before the shield/raze guard
+  -- below: shield bounces slashes, but never the bleed kill or an in-progress impale,
+  -- so we don't waste the window razing here.
   if bleed_ready then
     return "withdraw blade/sheathe sword/brokenstar " .. target
   end
@@ -482,7 +508,7 @@ local function build_brokenstar()
   local strike
   if phase == "leg_break" then strike = "knees"
   elseif phase == "upper_break" then strike = ice_strike()
-  elseif phase == "leg_prep" and mounted() and has("hamstring") and will_prep_both_legs() then strike = "knees"
+  elseif phase == "leg_prep" and mounted() and hamstrung() and will_prep_both_legs() then strike = "knees"
   else strike = prep_strike() end
 
   if has_shield() or has_rebounding() then
@@ -496,12 +522,12 @@ local function build_brokenstar()
 
   if phase == "upper_prep" then
     local kind = will_prep_upper() and "ice" or "lightning"
-    return infuse(kind) .. "centreslash " .. target .. " " .. centreslash_dir() .. " " .. strike .. "/assess " .. target
+    return infuse(kind) .. prep_upper() .. " " .. strike .. "/assess " .. target
   elseif phase == "upper_break" then
     return infuse("ice") .. "centreslash " .. target .. " " .. centreslash_dir() .. " " .. strike .. "/assess " .. target
   elseif phase == "leg_prep" then
     local kind = will_prep_both_legs() and "ice" or "lightning"
-    return infuse(kind) .. "legslash " .. target .. " " .. focus_leg() .. " " .. strike .. "/assess " .. target
+    return infuse(kind) .. prep_slash("legslash", "left leg", "right leg", focus_leg(), stance_dmg().legS) .. " " .. strike .. "/assess " .. target
   else -- leg_break
     return infuse("ice") .. "legslash " .. target .. " " .. focus_leg() .. " " .. strike .. "/assess " .. target
   end
@@ -513,7 +539,7 @@ end
 --------------------------------------------------------------------------------
 
 local function group_strike()
-  if not has("hamstring") then return "hamstring" end
+  if not hamstrung() then return "hamstring" end
   if not has("paralysis") then return "neck" end
   if not has("asthma")    then return "throat" end
   if not has("slickness") then return "underarm" end
@@ -566,7 +592,6 @@ function blademaster.dispatch(mode)
   if blademaster.state.last_target ~= target then -- new target: drop stale per-fight state
     blademaster.state.last_target = target
     blademaster.state.flamefist_done = false
-    clear_impaleslash_latch()
   end
 
   local combo = (STRATEGY[blademaster.state.mode] or build_double)()
@@ -615,26 +640,7 @@ function blademaster.reset()
   blademaster.state.fire_timer = nil
   blademaster.state.armed = false
   blademaster.state.flamefist_done = false
-  clear_impaleslash_latch()
   cecho("\n<green>[BM] reset")
-end
-
---------------------------------------------------------------------------------
--- TRIGGER CALLBACKS (wire manually; see MUDLET_SETUP.md)
---------------------------------------------------------------------------------
-
--- Impaleslash landed: self-clearing latch mirroring Levi's timpaleslash.
-function blademaster.on_impaleslash()
-  blademaster.state.impaleslash_latch = true
-  if blademaster.state.impaleslash_timer then killTimer(blademaster.state.impaleslash_timer) end
-  blademaster.state.impaleslash_timer = tempTimer(C.IMPALESLASH_LATCH, function()
-    blademaster.state.impaleslash_latch = false
-    blademaster.state.impaleslash_timer = nil
-  end)
-end
-
-function blademaster.on_hamstring()
-  blademaster.state.hamstring_time = os.time()
 end
 
 --------------------------------------------------------------------------------
@@ -653,12 +659,12 @@ function blademaster.debug_snapshot()
     parried = parried(),
     shin = shin(),
     impaled = impaled(),
-    impaleslash = blademaster.state.impaleslash_latch or false,
+    impaleslash = impaleslashed(),
     bleed = bleed(),
     prone = has("prone"),
     flamefist_done = blademaster.state.flamefist_done or false,
-    form = (Legacy and Legacy.Tannivh and Legacy.Tannivh.form) or nil,
-    dmg = form_dmg(),
+    stance = (Legacy and Legacy.Tannivh and Legacy.Tannivh.stance) or nil,
+    dmg = stance_dmg(),
   }
 end
 
@@ -690,17 +696,17 @@ cecho("\n<green>[BM] Blademaster loaded<reset> (mode: " .. blademaster.state.mod
 -- ── Design notes ────────────────────────────────────────────────────────────
 -- Killpath logic ported from Levi ataxia (005_CC_BM_Ice + 003_BrokenStar + 004_Group);
 -- only the state model changed, to shed fragility:
---   * Brokenstar reads affstrack.impale ("Me") and ak.bleeding rather than tracking
---     isImpaled/withdraw/twist-count. The kill is one string ("withdraw blade/sheathe
---     sword/brokenstar"); a writhe simply flips impale off and the cascade re-impales.
---     `impaleslash` is the lone latch and self-clears (CONFIG.IMPALESLASH_LATCH), so it
---     also guards brokenstar against stale ak.bleeding from a prior target.
+--   * Brokenstar reads affstrack.impale ("Me"), affstrack.score.impaleslash, and ak.bleeding
+--     rather than tracking isImpaled/impaleslashDone/withdraw/twist-count — so it needs NO
+--     custom triggers. The kill is one string ("withdraw blade/sheathe sword/brokenstar"); a
+--     writhe simply flips impale off and the cascade re-impales. The impaleslash gate also
+--     guards brokenstar against stale ak.bleeding from a prior target.
 --   * arm()/on_recover() JIT replaces the attackInFlight latch + GMCP balance handler.
 --   * Parry handling matches 005: airfist only, prep phases only; on low shin we just
 --     slash (the focus logic already steers off the parried limb). No pommelstrike fallback.
 --   * Group mode is the pommelstrike lock ladder only; use bmbs for the bleed kill.
 --     (Levi 004 also bleed-executes inside group; omitted here as the strategies are split.)
---   * Slash damage is a STATIC per-form table (CONFIG.DMG, keyed on Legacy.Tannivh.form);
+--   * Slash damage is a STATIC per-stance table (CONFIG.DMG, keyed on Legacy.Tannivh.stance);
 --     no live calibration — fill it by hand or with calibrate.lua.
 --   * AFF_THRESHOLD 33 and the lb raw-target key match the prior port; sibling modules
 --     use 30 — adjust CONFIG.AFF_THRESHOLD if you want parity.

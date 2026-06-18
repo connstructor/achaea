@@ -23,11 +23,11 @@ ak = { bleeding = 0, defs = {}, mounted = false, engaged = true, currenthealth =
 affstrack = { score = {}, impale = nil }
 lb = { Mystor = { hits = {} } }
 targetparry = "none"
-Legacy = { Curing = { Affs = {}, bal = { active = true } }, SLC = { limbs = {} }, Tannivh = { form = "thyr" } }
+Legacy = { Curing = { Affs = {}, bal = { active = true } }, SLC = { limbs = {} }, Tannivh = { stance = "thyr" } }
 
 dofile("blademaster.lua")
 
--- pin the form + its slash damage so threshold predictions are deterministic
+-- pin the stance + its slash damage so threshold predictions are deterministic
 blademaster.CONFIG.DMG.thyr = { legP = 17.3, legS = 11.5, armP = 17.3, armS = 11.5, torso = 18.1, head = 12.1, compass = 14.9 }
 
 ----------------------------------------------------------------------
@@ -36,7 +36,7 @@ blademaster.CONFIG.DMG.thyr = { legP = 17.3, legS = 11.5, armP = 17.3, armS = 11
 local ATTACK = { legslash=1, armslash=1, centreslash=1, compassslash=1, balanceslash=1,
   raze=1, airfist=1, flamefist=1, impale=1, impaleslash=1, bladetwist=1, withdraw=1,
   brokenstar=1, pommelstrike=1 }
-local DIR = { left=1, right=1, up=1, down=1, southeast=1, southwest=1 }
+local DIR = { left=1, right=1, up=1, down=1, north=1, south=1, east=1, west=1, southeast=1, southwest=1 }
 
 local function normalize(combo)
   local infuse, action, strike
@@ -81,9 +81,8 @@ local function decide(s)
   gmcp.Char.Vitals.bal, gmcp.Char.Vitals.eq = "1", "1"
   Legacy.Curing.Affs = s.selfaffs or {}
   blademaster.state.last_target = "Mystor"
-  blademaster.state.impaleslash_latch = s.slashed or false
+  affstrack.score.impaleslash = s.slashed and 100 or nil
   blademaster.state.flamefist_done = s.flamefist or false
-  blademaster.state.hamstring_time = s.ham_time or 0
   sent = {}
   ALIAS[s.mode]()
   for i = #sent, 1, -1 do
@@ -99,6 +98,7 @@ end
 local cases = {
   { "dbl/prep fresh", mode="double", limbs={}, expect="infuse=lightning | action=legslash left | strike=hamstring" },
   { "dbl/prep uneven", mode="double", limbs={["left leg"]=50,["right leg"]=20}, expect="infuse=lightning | action=legslash right | strike=hamstring" },
+  { "dbl/compassslash leg", mode="double", limbs={["left leg"]=95,["right leg"]=50}, expect="infuse=lightning | action=compassslash southwest | strike=hamstring" },
   { "dbl/final-prep ice", mode="double", limbs={["left leg"]=80,["right leg"]=80}, expect="infuse=ice | action=legslash left | strike=hamstring" },
   { "dbl/break+knees", mode="double", limbs={["left leg"]=92,["right leg"]=92}, expect="infuse=ice | action=legslash left | strike=knees" },
   { "dbl/mangle RL<200", mode="double", limbs={["left leg"]=130,["right leg"]=150}, affs={"prone"}, expect="infuse=ice | action=legslash right | strike=sternum" },
@@ -107,8 +107,9 @@ local cases = {
   { "dbl/parry low-shin", mode="double", limbs={["left leg"]=50,["right leg"]=50}, parry="leftleg", shin=10, expect="infuse=lightning | action=legslash right | strike=hamstring" },
   { "dbl/shield raze", mode="double", limbs={["left leg"]=50,["right leg"]=50}, shield=true, expect="infuse=lightning | action=raze | strike=hamstring" },
   { "dbl/rebounding raze", mode="double", limbs={["left leg"]=50,["right leg"]=50}, rebounding=true, expect="infuse=lightning | action=raze | strike=hamstring" },
-  { "dbl/ham-up -> neck", mode="double", limbs={}, affs={"hamstring"}, ham_time=os.time(), expect="infuse=lightning | action=legslash left | strike=neck" },
+  { "dbl/ham present -> neck", mode="double", limbs={}, affs={"hamstring"}, expect="infuse=lightning | action=legslash left | strike=neck" },
   { "quad/arm prep", mode="quad", limbs={}, expect="infuse=lightning | action=armslash left | strike=hamstring" },
+  { "quad/compassslash arm", mode="quad", limbs={["left arm"]=95,["right arm"]=50}, expect="infuse=lightning | action=compassslash west | strike=hamstring" },
   { "quad/leg prep", mode="quad", limbs={["left arm"]=92,["right arm"]=92}, expect="infuse=lightning | action=legslash left | strike=hamstring" },
   { "quad/flamefist", mode="quad", limbs={["left arm"]=92,["right arm"]=92,["left leg"]=92,["right leg"]=92}, flamefist=false, expect="infuse=nil | action=flamefist | strike=nil" },
   { "quad/arm break", mode="quad", limbs={["left arm"]=92,["right arm"]=92,["left leg"]=92,["right leg"]=92}, flamefist=true, expect="infuse=ice | action=armslash left | strike=ears" },
@@ -117,6 +118,7 @@ local cases = {
   { "quad/arm-prep airfist", mode="quad", limbs={}, parry="leftarm", shin=40, expect="infuse=nil | action=airfist | strike=nil" },
   { "quad/arm-break no-airfist", mode="quad", limbs={["left arm"]=92,["right arm"]=92,["left leg"]=92,["right leg"]=92}, flamefist=true, parry="leftarm", shin=40, expect="infuse=ice | action=armslash right | strike=ears" },
   { "bs/upper prep", mode="brokenstar", limbs={}, expect="infuse=lightning | action=centreslash down | strike=hamstring" },
+  { "bs/compassslash upper", mode="brokenstar", limbs={["torso"]=95,["head"]=50}, expect="infuse=lightning | action=compassslash north | strike=hamstring" },
   { "bs/leg prep", mode="brokenstar", limbs={["torso"]=92,["head"]=92}, expect="infuse=lightning | action=legslash left | strike=hamstring" },
   { "bs/upper break", mode="brokenstar", limbs={["torso"]=92,["head"]=92,["left leg"]=92,["right leg"]=92}, expect="infuse=ice | action=centreslash down | strike=ears" },
   { "bs/leg break", mode="brokenstar", limbs={["torso"]=100,["head"]=100,["left leg"]=92,["right leg"]=92}, expect="infuse=ice | action=legslash left | strike=knees" },
@@ -129,7 +131,7 @@ local cases = {
   { "bs/leg-prep airfist", mode="brokenstar", limbs={["torso"]=92,["head"]=92}, parry="leftleg", shin=40, expect="infuse=nil | action=airfist | strike=nil" },
   { "bs/upper-prep no-airfist", mode="brokenstar", limbs={}, parry="torso", shin=40, expect="infuse=lightning | action=centreslash down | strike=hamstring" },
   { "grp/fresh", mode="group", limbs={}, expect="infuse=ice | action=pommelstrike | strike=hamstring" },
-  { "grp/asthma", mode="group", affs={"hamstring","paralysis"}, ham_time=os.time(), expect="infuse=ice | action=pommelstrike | strike=throat" },
+  { "grp/asthma", mode="group", affs={"hamstring","paralysis"}, expect="infuse=ice | action=pommelstrike | strike=throat" },
   { "grp/shield raze", mode="group", shield=true, expect="infuse=nil | action=raze | strike=hamstring" },
 }
 
