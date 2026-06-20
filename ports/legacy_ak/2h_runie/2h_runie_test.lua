@@ -42,8 +42,10 @@ M.config.rune_priority = {
   sword = {"INGUZ", "SLEIZAK", "WUNJO"},
   warhammer = {"ISAZ", "NAUTHIZ"},
 }
+M.config.bisect_weapon = "bisectblade999"
 local SWORD_ID = M.config.bastard_sword
 local HAMMER_ID = M.config.warhammer
+local BISECT_ID = M.config.bisect_weapon
 
 -- ----------------------------------------------------------------------------
 -- Harness helpers
@@ -147,11 +149,15 @@ do
     function(c) return c == "BRAIN Enemy" end)
 end
 
-print("BISECT (<=25% HP) -> sword pinned, even in warhammer mode")
+print("BISECT (<=25% HP) -> dedicated bisect weapon, no empower (swap-in execute)")
 do
   local cmds, alias = fire({weapon_mode = "warhammer", hp_current = 100, hp_max = 1000})
-  assert_wield_empower("bisect", cmds, alias, SWORD_ID, "INGUZ SLEIZAK WUNJO",
-    function(c) return c:match("^BISECT Enemy") ~= nil end)
+  check("bisect: WIELD dedicated bisect weapon",
+    index_of(cmds, function(c) return c == "WIELD " .. BISECT_ID end) ~= nil, alias)
+  check("bisect: no EMPOWER line emitted",
+    index_of(cmds, function(c) return c:match("^EMPOWER PRIORITY SET") ~= nil end) == nil, alias)
+  check("bisect: BISECT attack present",
+    index_of(cmds, function(c) return c:match("^BISECT Enemy") ~= nil end) ~= nil, alias)
 end
 
 print("IMPALE (prone>=80) -> sword pinned, even in warhammer mode")

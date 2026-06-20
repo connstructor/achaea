@@ -33,6 +33,9 @@ M.config =
   {
     bastard_sword = "bastard537498",
     warhammer = "warhammer542360",
+    -- Dedicated edged Hugalaz runeblade kept in inventory only for BISECT (swapped
+    -- in for the execute, never stack-fought). TODO: set your bisect weapon's item id.
+    bisect_weapon = "TODO_BISECT_WEAPON_ID",
     rune_priority =
       {
         sword = {"INGUZ", "SLEIZAK", "WUNJO"},
@@ -345,21 +348,27 @@ local function pick_venom(state)
   return nil
 end
 
--- Map a semantic weapon kind ("sword" | "warhammer") to its configured item id.
+-- Map a semantic weapon kind ("sword" | "warhammer" | "bisect") to its item id.
 local function weapon_id_for_kind(kind)
-  return (kind == "warhammer") and M.config.warhammer or M.config.bastard_sword
+  if kind == "warhammer" then
+    return M.config.warhammer
+  elseif kind == "bisect" then
+    return M.config.bisect_weapon
+  end
+  return M.config.bastard_sword
 end
 
 -- The weapon kind a phase fights with. Finisher phases pin a specific weapon:
--- BRAIN and OVERWHELM ride the warhammer; DISEMBOWEL / IMPALE / BISECT ride the
--- sword. Every other phase follows the user's weapon_mode toggle (ww).
+-- BRAIN and OVERWHELM ride the warhammer; DISEMBOWEL and IMPALE ride the sword;
+-- BISECT rides a dedicated edged Hugalaz weapon swapped in just for the execute.
+-- Every other phase follows the user's weapon_mode toggle (ww).
 local PHASE_WEAPON_KIND =
   {
     [PHASE.PATH_B_BRAIN] = "warhammer",
     [PHASE.PATH_B_OVERWHELM] = "warhammer",
     [PHASE.PATH_A_DISEMBOWEL] = "sword",
     [PHASE.PATH_A_IMPALE] = "sword",
-    [PHASE.PATH_C_BISECT] = "sword",
+    [PHASE.PATH_C_BISECT] = "bisect",
   }
 
 local function weapon_kind_for_phase(state, phase)
@@ -454,10 +463,12 @@ local function build_batch(state, phase)
   add("WIELD " .. weapon)
   -- Empower only when the wielded weapon actually has runes configured; otherwise
   -- skip it (and warn once) so an unfilled warhammer set can't send garbage runes.
+  -- The bisect weapon is a swap-in execute whose config runes never attune, so we
+  -- skip its empower silently unless an explicit rune_priority.bisect is configured.
   local runes = rune_priority_for(kind)
   if rune_list_is_set(runes) then
     add("EMPOWER PRIORITY SET " .. table.concat(runes, " "))
-  elseif not empower_warned[kind] then
+  elseif kind ~= "bisect" and not empower_warned[kind] then
     empower_warned[kind] = true
     boxEcho.send(
       "[2H] No empower runes set for " ..
