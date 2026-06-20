@@ -8,7 +8,9 @@ local M = runewarden.twoh
 -- Config (user-editable; preserved across reloads)
 -- =============================================================
 -- Weapon item names as they appear to WIELD
--- Static rune priority for EMPOWER PRIORITY SET (defensive re-emit each batch)
+-- Per-weapon rune priority for EMPOWER PRIORITY SET (defensive re-emit each batch).
+-- Sword and warhammer carry different runes, so each weapon kind keeps its own list;
+-- the wielded weapon's list is emitted immediately after its WIELD.
 -- Affliction "treat as present" threshold: affstrack.score[aff] >= aff_threshold
 -- Per-aff overrides win when present.
 -- e.g., nausea = 60,
@@ -31,7 +33,12 @@ M.config =
   {
     bastard_sword = "bastard537498",
     warhammer = "warhammer542360",
-    rune_priority = {"ISAZ", "SLEIZAK", "SOWULU"},
+    rune_priority =
+      {
+        sword = {"INGUZ", "SLEIZAK", "WUNJO"},
+        -- TODO: set the runes carved on your warhammer (BRAIN / OVERWHELM wield it).
+        warhammer = {"TODO_RUNE_1", "TODO_RUNE_2"},
+      },
     aff_threshold = 50,
     aff_threshold_overrides = {},
     -- Latency-based arming: the dispatch is scheduled for (balance interval -
@@ -42,16 +49,16 @@ M.config =
     aff_priority =
       {
         {aff = "nausea", venom = "EUPHORBIA"},
-        {aff = "darkshade", venom = "DARKSHADE"},
-        {aff = "addiction", venom = "VARDRAX"},
         {aff = "paralysis", venom = "CURARE"},
-        {aff = "clumsiness", venom = "XENTIO"},
-        {aff = "anorexia", venom = "SLIKE"},
-        {aff = "dizziness", venom = "LARKSPUR"},
-        {aff = "stupidity", venom = "ACONITE"},
         {aff = "weariness", venom = "VERNALIUS"},
         {aff = "asthma", venom = "KALMIA"},
+        {aff = "anorexia", venom = "SLIKE"},
         {aff = "slickness", venom = "GECKO"},
+        {aff = "stupidity", venom = "ACONITE"},
+        {aff = "darkshade", venom = "DARKSHADE"},
+        {aff = "addiction", venom = "VARDRAX"},
+        {aff = "clumsiness", venom = "XENTIO"},
+        {aff = "dizziness", venom = "LARKSPUR"},
         {aff = "sensitivity", venom = "PREFARAR"},
         {aff = "recklessness", venom = "EURYPTERIA"},
         {aff = "disloyalty", venom = "MONKSHOOD"},
@@ -63,9 +70,9 @@ M.config =
     limb_priority =
       {
         {loc = "tendons", min = 5, max = 7, attack = "HEW", parry = nil},
-        {loc = "skull", min = 6, max = 7, attack = "OVERHAND", parry = "head"},
+        {loc = "skull", min = 5, max = 7, attack = "OVERHAND", parry = "head"},
+        {loc = "ribs", min = 5, max = 7, attack = "UNDERHAND", parry = "torso"},
         {loc = "wrist", min = 1, max = 1, attack = "HEW", parry = nil},
-        {loc = "ribs", min = 4, max = 7, attack = "UNDERHAND", parry = "torso"},
       },
   }
 -- =============================================================
@@ -338,9 +345,58 @@ local function pick_venom(state)
   return nil
 end
 
-local function weapon_for_mode(state)
-  return (state.weapon_mode == "sword") and M.config.bastard_sword or M.config.warhammer
+-- Map a semantic weapon kind ("sword" | "warhammer") to its configured item id.
+local function weapon_id_for_kind(kind)
+  return (kind == "warhammer") and M.config.warhammer or M.config.bastard_sword
 end
+
+-- The weapon kind a phase fights with. Finisher phases pin a specific weapon:
+-- BRAIN and OVERWHELM ride the warhammer; DISEMBOWEL / IMPALE / BISECT ride the
+-- sword. Every other phase follows the user's weapon_mode toggle (ww).
+local PHASE_WEAPON_KIND =
+  {
+    [PHASE.PATH_B_BRAIN] = "warhammer",
+    [PHASE.PATH_B_OVERWHELM] = "warhammer",
+    [PHASE.PATH_A_DISEMBOWEL] = "sword",
+    [PHASE.PATH_A_IMPALE] = "sword",
+    [PHASE.PATH_C_BISECT] = "sword",
+  }
+
+local function weapon_kind_for_phase(state, phase)
+  return PHASE_WEAPON_KIND[phase] or state.weapon_mode
+end
+
+-- Empower rune priority for a weapon kind. Sword and warhammer carry DIFFERENT
+-- runes, so EMPOWER PRIORITY SET must list the runes on the wielded weapon.
+-- Back-compat: an old flat-array config (single shared list) applies to both kinds.
+local function rune_priority_for(kind)
+  local rp = M.config.rune_priority
+  if rp[kind] then
+    return rp[kind]
+  end
+  if rp[1] then
+    return rp
+  end
+  return {}
+end
+
+-- A rune list counts as "unset" if it is empty or still holds a TODO placeholder.
+-- We skip EMPOWER for an unset list rather than feeding the game garbage rune names
+-- (which it silently rejects, leaving the weapon's empower priority wrong mid-fight).
+local function rune_list_is_set(list)
+  if #list == 0 then
+    return false
+  end
+  for _, r in ipairs(list) do
+    if r:match("^TODO") then
+      return false
+    end
+  end
+  return true
+end
+
+-- Warn at most once per weapon kind per load when its empower runes are unset.
+local empower_warned = {}
 
 -- For phases where weapon_mode applies (STACK, DEVASTATE flavors), this returns
 -- the venom we'd apply IF the current weapon supports it (sword only). Warhammer
@@ -372,7 +428,6 @@ end
 
 local function build_batch(state, phase)
   local cmds = {}
-  local cfg = M.config
 
   local function add(c)
     cmds[#cmds + 1] = c
@@ -380,7 +435,6 @@ local function build_batch(state, phase)
 
   -- Prefix (always emitted)
   add("RECOVER FOOTING")
-  add("EMPOWER PRIORITY SET " .. table.concat(cfg.rune_priority, " "))
   if not M.state.falcon_tracking then
     add("FALCON TRACK " .. target)
     runewarden.twoh.state.falcon_tracking = true
@@ -391,54 +445,60 @@ local function build_batch(state, phase)
   end
   add("FALCON REPORT")
   add("BATTLEFURY PERCEIVE " .. state.target)
-  -- Body (phase-dispatched)
+  -- Weapon + empower. Wield the phase's weapon, then set the empower priority to
+  -- THAT weapon's runes: sword and warhammer carry different runes, so one list
+  -- can't serve both. Empower must FOLLOW the wield (SnB/DWC convention) so it
+  -- targets the just-wielded weapon, not whatever the previous batch left in hand.
+  local kind = weapon_kind_for_phase(state, phase)
+  local weapon = weapon_id_for_kind(kind)
+  add("WIELD " .. weapon)
+  -- Empower only when the wielded weapon actually has runes configured; otherwise
+  -- skip it (and warn once) so an unfilled warhammer set can't send garbage runes.
+  local runes = rune_priority_for(kind)
+  if rune_list_is_set(runes) then
+    add("EMPOWER PRIORITY SET " .. table.concat(runes, " "))
+  elseif not empower_warned[kind] then
+    empower_warned[kind] = true
+    boxEcho.send(
+      "[2H] No empower runes set for " ..
+      kind .. "; skipping EMPOWER. Fill in config.rune_priority." .. kind .. "."
+    )
+  end
+  -- Body (phase-dispatched) — weapon is already wielded above.
   if phase == PHASE.PATH_B_BRAIN then
-    add("WIELD " .. cfg.warhammer)
     add("BRAIN " .. state.target)
   elseif phase == PHASE.PATH_A_DISEMBOWEL then
-    add("WIELD " .. cfg.bastard_sword)
     add("DISEMBOWEL " .. state.target)
     -- FURY rode the impale window; drop it once the chain finishes (same balance).
     add("FURY OFF")
   elseif phase == PHASE.PATH_A_IMPALE then
-    add("WIELD " .. cfg.bastard_sword)
     add("IMPALE " .. state.target)
     -- Turn FURY on after the impale lands so the disembowel hits boosted (same balance).
     add("FURY ON")
   elseif phase == PHASE.PATH_C_BISECT then
-    add("WIELD " .. cfg.bastard_sword)
     local venom = pick_venom(state)
     -- BISECT venom is inline (per help: `BISECT <target> [venom]`), not via ENVENOM
     add("BISECT " .. state.target .. (venom and (" " .. venom) or ""))
   elseif phase == PHASE.PATH_B_OVERWHELM then
-    add("WIELD " .. cfg.warhammer)
     add("BATTLEFURY OVERWHELM " .. state.target)
   elseif phase == PHASE.PATH_A_DEVASTATE then
-    -- DEVASTATE takes inline venom — only carried by sword. weapon_mode wins.
-    local weapon = weapon_for_mode(state)
+    -- DEVASTATE takes inline venom — only carried by sword (warhammer ⇒ nil).
     local venom = venom_if_carryable(state, weapon)
-    add("WIELD " .. weapon)
     add("DEVASTATE " .. state.target .. " LEGS" .. (venom and (" " .. venom) or ""))
     add("BATTLEFURY UPSET " .. state.target)
   elseif phase == PHASE.CARVE then
     -- CARVE/SPLINTER name depends on weapon. WIPE+ENVENOM only when sword.
-    local weapon = weapon_for_mode(state)
     local venom = venom_if_carryable(state, weapon)
-    add("WIELD " .. weapon)
     if venom then
       add("WIPE " .. weapon)
       add("ENVENOM " .. weapon .. " WITH " .. venom)
     end
     add(attack_command("CARVE", weapon) .. " " .. state.target)
   elseif phase == PHASE.MANUAL_DEVASTATE_ARMS then
-    local weapon = weapon_for_mode(state)
     local venom = venom_if_carryable(state, weapon)
-    add("WIELD " .. weapon)
     add("DEVASTATE " .. state.target .. " ARMS" .. (venom and (" " .. venom) or ""))
   elseif phase == PHASE.MANUAL_DEVASTATE_LEGS then
-    local weapon = weapon_for_mode(state)
     local venom = venom_if_carryable(state, weapon)
-    add("WIELD " .. weapon)
     add("DEVASTATE " .. state.target .. " LEGS" .. (venom and (" " .. venom) or ""))
     add("BATTLEFURY UPSET " .. state.target)
   elseif phase == PHASE.STACK then
@@ -449,9 +509,7 @@ local function build_batch(state, phase)
       pick = select_stack_attack(state)
     end
     if pick then
-      local weapon = weapon_for_mode(state)
       local venom = venom_if_carryable(state, weapon)
-      add("WIELD " .. weapon)
       if venom then
         add("WIPE " .. weapon)
         add("ENVENOM " .. weapon .. " WITH " .. venom)
