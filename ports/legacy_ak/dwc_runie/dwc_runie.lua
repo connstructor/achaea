@@ -1,1640 +1,824 @@
---[[
-================================================================================
-RUNEWARDEN DWC (DUAL CUTTING) — LEGACY / AK PORT
-================================================================================
-
-Consolidation of the seven LEVI/Ataxia CC scripts in
-  src_new/scripts/levi_ataxia/levi/levi_scripts/dwc_runie/
-
-Source files (preserved combat logic — restructured, not cloned):
-  001_RIFT.lua             -> runewarden.dwc.riftlock()
-  002_BASIC_2.lua          -> runewarden.dwc.basic()
-  003_Disembowel_Prep.lua  -> runewarden.dwc.disembowel()
-  004_Head_Prep.lua        -> runewarden.dwc.headprep()
-  005_DWCLogic.lua    \
-  006_Attack_DWC.lua   } -> runewarden.dwc.kelpstack()   (was envenom1+envenom2+dwcattack chain)
-  007_LeviDWCDisembowel.lua -> runewarden.dwc.lockprep() (lock-aware head prep)
-
-Six callable entries — pick the one matching the situation, or set a default
-and call dispatch():
-  rrift()    – Riftlock (anti-Restore: epteth on no-salve + addiction). Auto-picks
-               the salvelock arm (R arm → L arm → torso → legs).
-  rbasic()   – DWC pressure along the disembowel limb path: slashes the picked limb
-               (torso → R leg → L leg); delegates to disembowel under nausea+unprepped.
-  rdism()    – Torso-focused kill prep, auto-picks targetlimb (torso → R leg → L leg)
-  rhead()    – Head-focused mental stack, auto-picks targetlimb (head → R leg → ...)
-  rkelp()    – Kelp-stack venom selection, single-venom raze/dsl
-  rlock()    – Lock-aware disembowel + raze + prep w/ empower runes (was 007)
-
-Public API (everything else is file-local):
-  runewarden.dwc.CONFIG            table — tunables (item IDs, damage, thresholds)
-  runewarden.dwc.state             table — runtime state (engaged, falcon flags, targetLimb)
-  runewarden.dwc.mode              string — default mode for dispatch()
-
-  runewarden.dwc.setMode(m)        called by aliases (one of: riftlock|basic|disembowel|headprep|kelpstack|lockprep)
-  runewarden.dwc.setLimb(limb)     set the focus limb ("torso"/"head"/"left leg"/etc.)
-  runewarden.dwc.dispatch()        delegates to current mode handler
-  runewarden.dwc.status()          print current state
-  runewarden.dwc.reset()           clear runtime state
-
-  runewarden.dwc.riftlock()        | each callable directly so the user can
-  runewarden.dwc.basic()           | bind a key/alias straight to the mode
-  runewarden.dwc.disembowel()      | without going through setMode + dispatch.
-  runewarden.dwc.headprep()        |
-  runewarden.dwc.kelpstack()       |
-  runewarden.dwc.lockprep()        |
-
---------------------------------------------------------------------------------
-DEPENDENCY MAPPING (see DEPENDENCIES.md for the full table)
---------------------------------------------------------------------------------
-AK (target state):
-  tAffs.X                -> has("X")               (affstrack.score[X] >= 30)
-  lb[target].hits[limb]  -> unchanged
-  tBals.salve            -> targetBalDown("salve") (ak.bals.salve == false / nil)
-  ataxiaTemp.lastAssess  -> targetHpPct()          (ak.currenthealth/maxhealth)
-  ataxiaNDB_getClass(t)  -> DROPPED (was guarding the dead add_dedication branch)
-
-Legacy (self state):
-  ataxia.afflictions.X   -> selfAff("X")           (Legacy.Curing.Affs[X])
-  ataxia.settings.paused -> Legacy.Settings.Curing.status == false
-  ataxia.settings.separator -> "/" (hardcoded — SETALIAS ATK requires it)
-  ataxia.vitals.class    -> charstat("Class")      (only used for impale_blackout, dropped)
-  ataxia.vitals.hp/maxhp/mp/maxmp -> vital("hp") etc.
-  gmcp.Char.Vitals.hp/mp -> vital("hp") / vital("mp")    (string -> number coerced)
-  ataxia.getWeapon(slot) -> CONFIG.weapon1Id / CONFIG.weapon2Id (hardcoded; configurable)
-  ataxiaTables.limbData.dwcSlash -> CONFIG.dwcSlashDamage (per-swing slash %)
-  combatQueue()          -> REMOVED (Legacy handles pre-attack hooks externally)
-  reboundHold.gate(fn)   -> reboundGate(fn) (stub — user can hook in their own gate)
-  send("queue addclear free X") -> sendAttack(X, "FREE")
-  send("queue addclear freestand X") -> sendAttack(X, "FREESTAND")  (used by lockprep)
-
-Lock detection (was checkTargetLocks + getLockingAffliction in Levi):
-  softlock = anorexia + asthma + slickness|bloodfire   (3-of-4)
-  hardlock = softlock + impatience|sandfever
-  truelock = hardlock + paralysis
-  getLockingAffliction(target) -> DROPPED (required NDB class lookup;
-    the truelock-specific venom branch falls through to the standard
-    softlock/hardlock curare path)
-
-Dead-code dropped (computed but never read in original files):
-  add_dedication, partyrelay, impale_blackout, treelock, softlock (in 001-004)
-
-Module-owned state (was bare globals or ataxiaTemp.*):
-  engaged           -> runewarden.dwc.state.engaged
-  need_falcon       -> runewarden.dwc.state.needFalcon
-  falconattack      -> runewarden.dwc.state.falconAttack
-  inc_imp           -> runewarden.dwc.state.incImpatience
-  targetlimb        -> manual override via runewarden.dwc.state.targetLimb / global;
-                       absent either, each mode auto-picks (autoPickLimb/resolveLimb)
-  prepped_*         -> file-local per tick (recomputed every call)
-  venoms            -> file-local per tick
-  envenom1/envenom2 -> file-local per tick (kelpstack mode only)
-
-External (unchanged): gmcp, ak, Legacy, target, lb, affstrack
-================================================================================
-]] --
-
--- ============================================================
---  NAMESPACE INIT
--- ============================================================
+-- Runewarden Dual-Cutting (DWC) Combat Engine for Achaea (Mudlet)
+-- ---------------------------------------------------------------------------
+-- A decision engine that builds one batch per EQBAL window and submits it via
+-- the server-side QUEUE. Ported VERBATIM (branch order, attack commands, venom
+-- ladders) from the Levi/Ataxia DWC Runewarden source:
+--   dwc_runie/001_RIFT.lua            -> plan "rift"        (runie_riftlock)
+--   dwc_runie/002_BASIC_2.lua         -> plan "basic"       (dwcpriosbasic)
+--   dwc_runie/003_Disembowel_Prep.lua -> plan "disembowel"  (dwcprioslimb)   [default]
+--   dwc_runie/004_Head_Prep.lua       -> plan "head"        (dwcpriosheadprep)
+-- The firing/arming spine (arm + JIT timer + SETALIAS/QUEUE dispatch) and the
+-- limb model are reused from the sibling Runewarden ports (2h_runie, snb_runie).
+--
+-- STATE SOURCES (the "dead global" trap is why the prior DWC/Magi ports were
+-- scrapped: every state READ below maps to a *proven* AK/Legacy accessor):
+--   Levi symbol                       -> AK / Legacy equivalent
+--   tAffs.<aff>                       -> aff_present(s,"<aff>") = affstrack.score[aff] >= threshold
+--   tAffs.rebounding / .shield        -> ak.defs.rebounding / .shield (NOT affstrack)
+--   tAffs.impaled / timpale           -> affstrack.impale == "Me"
+--   tAffs.damaged<limb> / brokenarm   -> is_limb_broken(limb) = lb[target].hits[limb] >= 100
+--   tAffs.mildtrauma                  -> is_limb_broken("torso")
+--   lb[target].hits[limb]             -> same (spaced keys, raw target key)
+--   php / ataxiaTemp.lastAssess       -> hp_pct(s) from ak.currenthealth(/.health) / ak.maxhealth
+--   engaged                           -> ak.engaged
+--   tAffs.bleed                       -> ak.bleeding  (DISPLAY ONLY; the ladder never branches on
+--                                        it, refreshed by the optional DISCERN ridealong)
+--   ataxia.getWeapon("weaponN")       -> M.config.weaponN
+--   scimdamage = dwcSlash * 2         -> M.config.dwc_slash_damage * 2  (a DSL is two slashes)
+--   tBals.salve                       -> not tracked by AK; see M.state.salve_down (rift only)
+--
+-- Required host globals (provided by Mudlet + Legacy/AK at runtime):
+--   send, tempTimer, getNetworkLatency, boxEcho, echo, os.time
+--   gmcp.Char.Vitals.bal/.eq ("1"/"0"), target, ak.*, affstrack.*, lb, ignoreShield
+--
+-- This module self-registers NOTHING. Wire the aliases/triggers by hand in
+-- Mudlet (see MUDLET_SETUP.md / DEPENDENCIES.md).
+-- ===========================================================================
 runewarden = runewarden or {}
 runewarden.dwc = runewarden.dwc or {}
+local M = runewarden.dwc
 
-runewarden.dwc.mode = runewarden.dwc.mode or "basic"
+-- =============================================================
+-- Config (user-editable; preserved across reloads)
+-- =============================================================
+M.config =
+  M.config or
+  {
+    -- The two cutting weapons wielded for dual-cutting. TODO: set to your item ids.
+    weapon1 = "scimitar",
+    weapon2 = "scimitar",
+    -- Swap-in execute weapon for the dispatch-level BISECT in the disembowel/head
+    -- plans (Levi: `wield bastard;grip`). TODO: set to your bastard/2H item id.
+    bisect_weapon = "bastard",
+    -- The basic/rift plans use a SnB-style bisect (`wield shield <this>`).
+    basic_bisect_weapon = "longsword",
+    -- EMPOWER PRIORITY SET runes for the head-prep plan (head crack via runelore).
+    empower_runes = "KENA MANNAZ SLEIZAK",
+    -- Per-slash limb damage (ataxiaTables.limbData.dwcSlash). scimdamage = 2x this,
+    -- because a DSL lands two slashes; prep math predicts a one-DSL break.
+    dwc_slash_damage = 6.6,
+    -- Affliction "treat as present" threshold: affstrack.score[aff] >= aff_threshold.
+    aff_threshold = 50,
+    aff_threshold_overrides = {},
+    -- Target values that mean "no real target."
+    invalid_targets = {None = true, Dude = true},
+    -- Append `DISCERN <target>` to each batch to keep ak.bleeding fresh (display
+    -- only; the DWC decision tree never branches on bleed). Set false for a 1:1
+    -- match with the Levi source (which does not discern).
+    discern_ridealong = true,
+    -- combatQueue() prefix analog (commands prepended before the attack body).
+    precommands = {},
+    -- Latency-based arming. nil => getNetworkLatency().
+    prearm_interval = nil,
+  }
 
-runewarden.dwc.state = runewarden.dwc.state or {
-    engaged = false,
-    needFalcon = false,
-    falconAttack = false,
-    incImpatience = false,
-    targetLimb = nil -- nil means "use auto-pick logic" or fallback to global `targetlimb`
-}
+-- =============================================================
+-- State (engine-managed; preserved across reloads)
+-- =============================================================
+M.state =
+  M.state or
+  {
+    armed = false,
+    -- "disembowel" | "head" | "basic" | "rift"; selected by the user via dwcplan.
+    plan = "disembowel",
+    -- Levi `need_falcon`: emit FALCON SLAY on the first (un-engaged) batch.
+    need_falcon = true,
+    -- Levi `tBals.salve == false`: target's salve balance is down. AK can't see it,
+    -- so it's a manual flag the rift plan's riftlock (epteth/epteth) branch reads.
+    salve_down = false,
+    last_fire_time = 0,
+  }
 
--- ============================================================
---  CONFIG  (all tunables — replace item IDs with your own)
--- ============================================================
-runewarden.dwc.CONFIG = runewarden.dwc.CONFIG or {
-    -- AK affstrack confidence threshold (0-100). >= this counts as "present".
-    affThreshold = 30,
-
-    -- Per-strike DWC slash damage as a flat % of target HP. Was
-    -- ataxiaTables.limbData.dwcSlash. Calibrate against a live target if needed.
-    -- Used in `scim = dwc * 2` (two slashes per dsl) and `axe = scim - 3` (raze
-    -- threshold detection for axe-damage-undershoots-100% case).
-    dwcSlashDamage = 16,
-
-    -- Axe-vs-scim differential (axe deals dwcSlashDamage - axeDelta per swing).
-    -- Drives the need_raze2 / need_raze3 limb-prep raze branches.
-    axeDelta = 3,
-
-    -- Weapon item IDs for `wield` sends. The runie code originally pulled
-    -- these from ataxia.getWeapon("weapon1"|"weapon2"). Hardcoded here for
-    -- portability; override with your scimitar/axe IDs.
-    weapon1Id = "scimitar1",
-    weapon2Id = "scimitar2",
-
-    -- Two-handed item ID for bisect kill (was `bastard` in 003/004, `longsword`
-    -- in 001/002, `bastard` in 006). Use whatever you bisect with.
-    bisectWeaponId = "bastard",
-
-    -- Bisect HP% threshold. <= this triggers bisect kill if no shield.
-    bisectHpThresh = 35,
-
-    -- Empower rune priority for lockprep mode (Runelore).
-    empowerRunes = "kena mannaz sleizak",
-
-    -- Self lock-break cooldown (seconds) between `tree` attempts.
-    lockBreakCooldown = 2
-}
-
--- ============================================================
---  AK HELPERS
--- ============================================================
--- affstrack.score[aff] is a 0-100 confidence value: 100 = fresh apply,
--- lower = ambiguous cure reduced certainty, nil = no evidence.
-local function has(aff)
-    return affstrack and affstrack.score and (affstrack.score[aff] or 0) >=
-               runewarden.dwc.CONFIG.affThreshold
+-- =============================================================
+-- State read + helpers
+-- =============================================================
+-- Both balance and equilibrium ready? GMCP reports balances as "1"/"0" strings.
+local function on_eqbal()
+  return gmcp and gmcp.Char and gmcp.Char.Vitals and gmcp.Char.Vitals.bal == "1" and
+    gmcp.Char.Vitals.eq == "1"
 end
 
--- Bulk check: returns true iff at least `n` of the listed affs are present.
--- Equivalent to Levi's checkAffList({...}, n).
-local function hasN(list, n)
-    local c = 0
-    for _, a in ipairs(list) do
-        if has(a) then
-            c = c + 1
-            if c >= n then
-                return true
-            end
-        end
-    end
+-- A "real" target is non-empty and not in the invalid set ("None", "Dude", etc.)
+local function is_valid_target(t)
+  if not t or t == "" then
     return false
-end
-
--- Target HP%. Was ataxiaTemp.lastAssess (already a 0-100 number).
-local function targetHpPct()
-    if not ak or not ak.maxhealth or ak.maxhealth <= 0 then
-        return 100
-    end
-    return math.floor((ak.currenthealth or 0) / ak.maxhealth * 100)
-end
-
--- Target balance tracking. Levi's `tBals.salve == false` meant "salve is on
--- cooldown" (target recently applied a salve). AK convention used here:
--- ak.bals[name] = true means up, false means down. Returns true iff the
--- balance is known to be down (Levi's == false semantics).
-local function targetBalDown(name)
-    if not ak or not ak.bals then
-        return false
-    end
-    return ak.bals[name] == false
-end
-
--- Limb damage lookup. AK and Levi both use lb[target].hits[limb].
-local function getLimbDamage(limb)
-    if not target or not lb or not lb[target] or not lb[target].hits then
-        return 0
-    end
-    return lb[target].hits[limb] or 0
-end
-
--- ============================================================
---  GMCP / VITALS HELPERS
--- ============================================================
-local function vital(key)
-    return tonumber(gmcp and gmcp.Char and gmcp.Char.Vitals and
-                        gmcp.Char.Vitals[key]) or 0
-end
-
--- ============================================================
---  LEGACY (SELF) HELPERS
--- ============================================================
-local function selfAff(name)
-    local a = Legacy and Legacy.Curing and Legacy.Curing.Affs
-    return a and a[name] or false
-end
-
-local function isPaused()
-    return not (Legacy and Legacy.Settings and Legacy.Settings.Curing and
-               Legacy.Settings.Curing.status)
-end
-
--- ============================================================
---  SELF LOCK-BREAK  (collapsed Knight version)
--- ============================================================
--- Runewarden has TREE tattoo for random aff cure. Fitness is Monk-only;
--- knights use `touch tree` instead. The shikudo port's `fitness` send is
--- not appropriate here — replaced with `touch tree`.
-local _lockBreakCooldown = 0
-
-local function selfNeedLockBreak()
-    return selfAff("asthma") and selfAff("anorexia") and
-               (selfAff("slickness") or selfAff("bloodfire"))
-end
-
-local function selfLockBreak()
-    if os.time() < _lockBreakCooldown then
-        return false
-    end
-    if not selfNeedLockBreak() then
-        return false
-    end
-    if selfAff("prone") and not selfAff("paralysis") then
-        send("stand", false)
-    end
-    send("touch tree", false)
-    _lockBreakCooldown = os.time() + runewarden.dwc.CONFIG.lockBreakCooldown
-    return true
-end
-
--- ============================================================
---  REBOUND HOLD GATE  (stub — was reboundHold.gate(fn) in Levi)
--- ============================================================
--- The Levi reboundHold subsystem defers attacks while we have rebounding
--- against physical-attack classes. It's not part of AK/Legacy. Provide a
--- stub the user can override:
---   runewarden.dwc.reboundGate = function(fn) return false end  -- never hold
--- Default returns false (never holds), which preserves attack flow.
-runewarden.dwc.reboundGate = runewarden.dwc.reboundGate or function(_)
+  end
+  if M.config.invalid_targets and M.config.invalid_targets[t] then
     return false
+  end
+  return true
 end
 
--- ============================================================
---  SEND HELPER  (Legacy SETALIAS ATK / QUEUE ADDCLEARFULL pattern)
--- ============================================================
--- Commands inside the ATK alias are `/`-separated, then queued.
--- queueType: "FREE" (most modes), "FREESTAND" (lockprep, was "queue
--- addclear freestand" in 007), or "EQBAL".
-local function sendAttack(cmd, queueType)
-    send("SETALIAS ATK " .. cmd)
-    send("QUEUE ADDCLEARFULL " .. (queueType or "FREE") .. " ATK")
+-- lb keys use spaced limb names ("left leg"); raw target key per AK convention.
+local function get_limb_damage(limb)
+  return (lb and lb[target] and lb[target].hits and lb[target].hits[limb]) or 0
 end
 
--- ============================================================
---  WEAPON / WIELD HELPERS
--- ============================================================
-local function w1()
-    return runewarden.dwc.CONFIG.weapon1Id
-end
-local function w2()
-    return runewarden.dwc.CONFIG.weapon2Id
+-- Level-2 break (crippled) is 100%. Levi's tAffs.damaged<limb> / mildtrauma /
+-- broken<arm> are all derived from this lb-backed read (the proven source).
+local function is_limb_broken(limb)
+  return get_limb_damage(limb) >= 100
 end
 
--- Standard wield-and-wipe prefix used by every DSL/raze command.
--- "wield w1 w2/wipe w1/wipe w2/"
-local function wieldPrefix()
-    return "wield " .. w1() .. " " .. w2() .. "/wipe " .. w1() .. "/wipe " ..
-               w2() .. "/"
-end
-
--- The dwcattack-style left/right split (was used by 006 only).
-local function wieldLRPrefix()
-    return "wield left " .. w1() .. "/wield right " .. w2() .. "/grip/"
-end
-
--- ============================================================
---  LIMB-PREP CALCULATION
--- ============================================================
--- Per-call snapshot table. Computed at the top of each mode function.
--- Mirrors the prepped_leftleg / prepped_rightleg / prepped_torso / ... block
--- repeated near-verbatim in every source file.
---
--- "Prepped" = next dsl (two slashes) will break the limb AND it's not already
--- broken. "Raze-prepped" (prepped2_*) = one slash through raze would still
--- break, used in 007's raze-against-rebounding branches.
-local function calcPrepped()
-    local scim = runewarden.dwc.CONFIG.dwcSlashDamage * 2 -- dsl = two slashes
-    local axe = scim - runewarden.dwc.CONFIG.axeDelta -- raze-undershoot detection
-    local scim1 = runewarden.dwc.CONFIG.dwcSlashDamage -- single slash (raze)
-
-    local p = {}
-    local hits = {
-        ll = getLimbDamage("left leg"),
-        rl = getLimbDamage("right leg"),
-        la = getLimbDamage("left arm"),
-        ra = getLimbDamage("right arm"),
-        h = getLimbDamage("head"),
-        t = getLimbDamage("torso")
+-- Snapshot of all decision-relevant framework state at one moment.
+local function read_state()
+  return
+    {
+      target = target,
+      aff = (affstrack and affstrack.score) or {},
+      -- affstrack.impale holds who is impaling; "Me" => the target is impaled by us.
+      impaled = (affstrack and affstrack.impale == "Me") or false,
+      -- HP robust across AK builds: 2h/blademaster expose currenthealth/maxhealth,
+      -- snb exposes health. Read whichever is populated.
+      hp_current = tonumber(ak and ak.currenthealth) or tonumber(ak and ak.health) or 0,
+      hp_max = tonumber(ak and ak.maxhealth) or 1,
+      rebounding = (ak and ak.defs and ak.defs.rebounding and not ignoreShield) or false,
+      shield = (ak and ak.defs and ak.defs.shield and not ignoreShield) or false,
+      engaged = (ak and ak.engaged) or false,
+      bleed = tonumber(ak and ak.bleeding) or 0, -- display only
     }
-
-    p.scim = scim
-    p.axe = axe
-    p.scim1 = scim1
-    p.hits = hits
-
-    p.leftleg = (hits.ll + scim >= 100) and not has("damagedleftleg")
-    p.rightleg = (hits.rl + scim >= 100) and not has("damagedrightleg")
-    p.leftarm = (hits.la + scim >= 100) and not has("damagedleftarm")
-    p.rightarm = (hits.ra + scim >= 100) and not has("damagedrightarm")
-    p.head = (hits.h + scim >= 100) and not has("damagedhead")
-    p.torso = (hits.t + scim >= 100) and not has("mildtrauma")
-
-    -- Raze-prepped (single-slash threshold under rebounding/shield).
-    -- NOTE: source has a precedence bug — `and X or Y` mixed with `and Z` —
-    -- preserved here. The intent appears to be "limb at single-slash prep
-    -- and (shielded or rebounding)" but the original reads as "(... not
-    -- damaged and shielded) or rebounding". Kept exact for fidelity.
-    local sob = has("shield") or has("rebounding")
-    p.razeLeftleg = (hits.ll + scim1 >= 100) and not has("damagedleftleg") and
-                        sob
-    p.razeRightleg = (hits.rl + scim1 >= 100) and not has("damagedrightleg") and
-                         sob
-    p.razeLeftarm = (hits.la + scim1 >= 100) and not has("damagedleftarm") and
-                        sob
-    p.razeRightarm = (hits.ra + scim1 >= 100) and not has("damagedrightarm") and
-                         sob
-    p.razeHead = (hits.h + scim1 >= 100) and not has("damagedhead") and sob
-    p.razeTorso = (hits.t + scim1 >= 100) and not has("mildtrauma") and sob
-
-    return p
 end
 
--- "need_raze2 / need_raze3" — limb is dsl-prepped but axe-undershoots, i.e.
--- we need to raze first (one slash of raze + one of axe < 100, but two
--- scimitar slashes >= 100). Used by 001-004's raze branches.
-local function needRazeForLimb(limb, p)
-    if not p then
-        return false
-    end
-    local d = getLimbDamage(limb)
-    return (d + p.scim >= 100) and (d + p.axe < 100)
+-- Treat affliction as present when confidence >= threshold (per-aff override wins).
+local function aff_present(state, name)
+  local th = (M.config.aff_threshold_overrides and M.config.aff_threshold_overrides[name]) or
+    M.config.aff_threshold
+  return (tonumber(state.aff[name]) or 0) >= th
 end
 
--- ============================================================
---  LOCK DETECTION
--- ============================================================
--- Was checkTargetLocks() — sets softlock / hardlock / truelock.
--- Returns them in a small struct rather than mutating globals.
-local function checkLocks()
-    local softlock = hasN({"anorexia", "asthma", "slickness", "bloodfire"}, 3)
-    local hardlock = softlock and hasN({"impatience", "sandfever"}, 1)
-    local truelock = hardlock and has("paralysis")
-    return {soft = softlock, hard = hardlock, true_ = truelock}
+local function hp_pct(state)
+  return state.hp_current / state.hp_max
 end
 
--- ============================================================
---  TARGET LIMB RESOLUTION
--- ============================================================
--- The original code expects a global `targetlimb`. We read from
--- runewarden.dwc.state.targetLimb first, then fall back to the legacy
--- global, then to a default.
-local function getTargetLimb(default)
-    return runewarden.dwc.state.targetLimb or rawget(_G, "targetlimb") or
-               default or "right leg"
+-- Derived per-tick limb math (Levi scimdamage / prepped_* / damaged_*). Reset every
+-- call -- never share across plans (002's reliance on a stale prepped_torso global
+-- was a Levi bug; we recompute it locally instead).
+local function derive(state)
+  local d = {}
+  d.scimdamage = M.config.dwc_slash_damage * 2
+  d.axedamage = d.scimdamage - 3
+  local function prepped(limb)
+    return get_limb_damage(limb) + d.scimdamage >= 100 and not is_limb_broken(limb)
+  end
+  d.prepped_leftleg = prepped("left leg")
+  d.prepped_rightleg = prepped("right leg")
+  d.prepped_leftarm = prepped("left arm")
+  d.prepped_rightarm = prepped("right arm")
+  d.prepped_head = prepped("head")
+  d.prepped_torso = prepped("torso")
+  d.damagedleftleg = is_limb_broken("left leg")
+  d.damagedrightleg = is_limb_broken("right leg")
+  d.damagedleftarm = is_limb_broken("left arm")
+  d.damagedrightarm = is_limb_broken("right arm")
+  d.damagedhead = is_limb_broken("head")
+  d.damagedtorso = is_limb_broken("torso")
+  return d
 end
 
--- Per-mode automatic limb selection. In Levi, `targetlimb` was a shared global
--- that the disembowel picker (dwcprioslimb) wrote and basic/riftlock read; the
--- consolidation turned each mode's pick into a function-local, so basic and
--- riftlock lost their auto-target and fell back to a fixed "right leg". This
--- restores per-mode auto-targeting (user choice: "pick based on the mode it's
--- running in", keep per-mode routes):
---   basic    -> disembowel route: torso -> right leg -> left leg
---   riftlock -> salvelock route:  right arm -> left arm, then torso -> legs
---     (epteth breaks arms; two broken arms + slickness + asthma = salvelock,
---      which is the whole point of riftlock — so drive the arms, not a leg.)
--- disembowel/headprep/lockprep keep their own inline pickers and do NOT route
--- through here. Returns nil when no limb applies (caller uses the default).
-local function autoPickLimb(mode, p)
-    if mode == "riftlock" then
-        if not has("damagedrightarm") then return "right arm" end
-        if not has("damagedleftarm") then return "left arm" end
-        if not has("damagedtorso") then return "torso" end
-        if not p.rightleg then return "right leg" end
-        if not p.leftleg then return "left leg" end
-        return nil
-    end
-    -- basic (and any future caller): disembowel prep order, matching the
-    -- original dwcprioslimb() limb logic (003_Disembowel_Prep.lua:265-268).
-    if not has("damagedtorso") then return "torso" end
-    if not p.rightleg then return "right leg" end
-    if p.rightleg and not p.leftleg then return "left leg" end
-    return nil
+-- =============================================================
+-- Command builders (shared)
+-- =============================================================
+local function extend(dst, src)
+  for _, c in ipairs(src) do
+    dst[#dst + 1] = c
+  end
 end
 
--- Limb resolution with manual override priority:
---   manual setLimb (state.targetLimb) -> legacy global -> per-mode auto-pick -> default
--- This is what lets basic/riftlock target a limb on their own instead of
--- waiting for `rdwclimb`, while still honouring an explicit manual choice.
-local function resolveLimb(mode, p, default)
-    return runewarden.dwc.state.targetLimb or rawget(_G, "targetlimb") or
-               autoPickLimb(mode, p) or default
+-- The DWC re-wield/wipe prefix that opens almost every attack branch:
+--   wield W1 W2;wipe W1;wipe W2;assess <target>
+local function ww(s)
+  local w1, w2 = M.config.weapon1, M.config.weapon2
+  return {"WIELD " .. w1 .. " " .. w2, "WIPE " .. w1, "WIPE " .. w2, "ASSESS " .. s.target}
 end
 
-function runewarden.dwc.setLimb(limb)
-    runewarden.dwc.state.targetLimb = limb
-    cecho("\n<cyan>[DWC] Target limb set to <yellow>" .. tostring(limb))
+-- DSL <target> [limb] <v..>  — skips empty/nil venom slots so a short venom list
+-- never produces a malformed command.
+local function dsl(s, limb, ...)
+  local parts = {"DSL", s.target}
+  if limb then
+    parts[#parts + 1] = limb
+  end
+  for _, v in ipairs({...}) do
+    if v and v ~= "" then
+      parts[#parts + 1] = v
+    end
+  end
+  return table.concat(parts, " ")
 end
 
--- ============================================================
---  COMMAND HELPERS (build dsl / raze / impale / disembowel / bisect strings)
--- ============================================================
--- All return the full "wield...wipe...assess...action" tail. Caller prepends
--- any pre-attack chain (e.g. falcon slay/, contemplate, empower).
-local function cmdAssess()
-    return "assess " .. target
+local function razeslash(s, limb, venom)
+  local parts = {"RAZESLASH", s.target}
+  if limb then
+    parts[#parts + 1] = limb
+  end
+  if venom and venom ~= "" then
+    parts[#parts + 1] = venom
+  end
+  return table.concat(parts, " ")
 end
 
-local function cmdDsl(limb, v1, v2)
-    if limb then
-        return wieldPrefix() .. cmdAssess() .. "/dsl " .. target .. " " .. limb ..
-                   " " .. v1 .. " " .. v2
-    end
-    return wieldPrefix() .. cmdAssess() .. "/dsl " .. target .. " " .. v1 ..
-               " " .. v2
+-- Dispatch-level BISECT (disembowel/head plans): `wield bastard;grip;assess;bisect;engage`.
+-- Always engages; short-circuits the whole batch (the atk-string bisect branch is dead).
+local function bisect_dispatch(s)
+  return
+    {
+      "WIELD " .. M.config.bisect_weapon,
+      "GRIP",
+      "ASSESS " .. s.target,
+      "BISECT " .. s.target .. " CURARE",
+      "ENGAGE " .. s.target,
+    }
 end
 
-local function cmdRazeslash(limb, v1)
-    return wieldPrefix() .. cmdAssess() .. "/razeslash " .. target .. " " ..
-               limb .. " " .. v1
+-- SnB-style BISECT body (basic/rift plans): `wield shield <weapon>;assess;bisect`.
+local function bisect_body(s)
+  return
+    {
+      "WIELD SHIELD " .. M.config.basic_bisect_weapon,
+      "ASSESS " .. s.target,
+      "BISECT " .. s.target .. " CURARE",
+    }
 end
 
-local function cmdRazeslashNoLimb(v1)
-    -- 002 BASIC's razeslash variant (no limb arg).
-    return wieldPrefix() .. cmdAssess() .. "/razeslash " .. target .. " " .. v1
+-- =============================================================
+-- Venom ladders (ported VERBATIM, one per plan). Each walks top-to-bottom
+-- building an ordered list; venoms[1]/[2] feed the DSL/RAZESLASH commands.
+-- tBals.salve is untracked (treated absent); inc_imp is untracked (false).
+-- =============================================================
+
+-- 003_Disembowel_Prep
+local function venoms_disembowel(s, d)
+  local v = {}
+  local function ins(x) v[#v + 1] = x end
+  local function a(n) return aff_present(s, n) end
+  if (d.prepped_leftleg and d.prepped_rightleg) and d.damagedtorso and not a("prone") and
+    not s.rebounding and not s.shield then
+    ins("DELPHINIUM"); ins("DELPHINIUM")
+  end
+  if (d.prepped_leftleg or d.prepped_rightleg) and d.prepped_head and not a("prone") and
+    not s.rebounding and not s.shield then
+    ins("DELPHINIUM"); ins("DELPHINIUM")
+  end
+  if a("impatience") and not a("anorexia") and not a("slickness") and a("asthma") then
+    ins("SLIKE"); ins("GECKO")
+  end
+  if a("impatience") and not a("anorexia") then -- and not tBals.salve (untracked => true)
+    ins("SLIKE")
+  end
+  if a("slickness") and not a("anorexia") and not a("stupidity") and a("asthma") then
+    ins("ACONITE"); ins("SLIKE")
+  end
+  if a("anorexia") and not a("dizziness") then ins("LARKSPUR") end
+  if a("anorexia") and not a("stupidity") then ins("ACONITE") end
+  if a("anorexia") and not a("shyness") then ins("DIGITALIS") end
+  if a("anorexia") and not a("recklessness") then ins("EURYPTERIA") end
+  if not a("paralysis") then ins("CURARE") end
+  if not a("nausea") then ins("VERNALIUS") end
+  if not a("asthma") then ins("KALMIA") end
+  if not a("clumsiness") then ins("XENTIO") end
+  if not a("slickness") and a("asthma") and v[1] == "CURARE" then ins("GECKO") end
+  if not a("addiction") then ins("VARDRAX") end
+  if not a("sensitivity") and a("deaf") then ins("PREFARAR"); ins("PREFARAR") end
+  if not a("sensitivity") and not a("deaf") then ins("PREFARAR") end
+  if not a("recklessness") then ins("EURYPTERIA") end
+  if not a("stupidity") then ins("ACONITE") end
+  if not a("dizziness") then ins("LARKSPUR") end
+  if not a("shyness") then ins("DIGITALIS") end
+  if not d.damagedrightarm then ins("EPTETH") end -- not tAffs.brokenrightarm
+  if not d.damagedleftarm then ins("EPTETH") end -- not tAffs.brokenleftarm
+  if not a("darkshade") then ins("DARKSHADE") end
+  return v
 end
 
-local function cmdImpale(furyOn)
-    local s = wieldPrefix() .. cmdAssess() .. "/impale " .. target
-    if furyOn then
-        s = wieldPrefix() .. cmdAssess() .. "/fury on/impale " .. target
-    end
-    return s
+-- 004_Head_Prep
+local function venoms_head(s, d)
+  local v = {}
+  local function ins(x) v[#v + 1] = x end
+  local function a(n) return aff_present(s, n) end
+  local inc_imp = false -- Levi self-tracks incoming impatience; no AK source.
+  if a("impatience") and a("anorexia") and not a("slickness") and not a("paralysis") then
+    ins("CURARE"); ins("GECKO")
+  end
+  if a("impatience") and not a("anorexia") and a("slickness") and not a("paralysis") then
+    ins("CURARE"); ins("SLIKE")
+  end
+  if a("impatience") and not a("anorexia") and not a("slickness") then
+    ins("GECKO"); ins("SLIKE")
+  end
+  if a("slickness") and not a("anorexia") and not a("stupidity") and a("asthma") then
+    ins("ACONITE"); ins("SLIKE")
+  end
+  if a("impatience") and not a("anorexia") and not a("slickness") and a("asthma") then
+    ins("SLIKE"); ins("GECKO")
+  end
+  if a("impatience") and not a("anorexia") then -- and not tBals.salve
+    ins("SLIKE")
+  end
+  if inc_imp and not a("paralysis") then ins("CURARE") end
+  if inc_imp and not a("asthma") then ins("KALMIA") end
+  if a("anorexia") and not a("dizziness") then ins("LARKSPUR") end
+  if a("anorexia") and not a("stupidity") then ins("ACONITE") end
+  if a("anorexia") and not a("shyness") then ins("DIGITALIS") end
+  if a("anorexia") and not a("recklessness") then ins("EURYPTERIA") end
+  if not a("paralysis") then ins("CURARE") end
+  if not a("nausea") then ins("VERNALIUS") end
+  if not a("asthma") then ins("KALMIA") end
+  if not a("clumsiness") then ins("XENTIO") end
+  if not a("slickness") and a("asthma") and v[1] == "CURARE" then ins("GECKO") end
+  if not a("sensitivity") and a("deaf") then ins("PREFARAR"); ins("PREFARAR") end
+  if not a("sensitivity") and not a("deaf") then ins("PREFARAR") end
+  if not a("addiction") then ins("VARDRAX") end
+  if not a("recklessness") then ins("EURYPTERIA") end
+  if not a("stupidity") then ins("ACONITE") end
+  if not a("dizziness") then ins("LARKSPUR") end
+  if not a("shyness") then ins("DIGITALIS") end
+  if not d.damagedrightarm then ins("EPTETH") end
+  if not d.damagedleftarm then ins("EPTETH") end
+  if not a("darkshade") then ins("DARKSHADE") end
+  return v
 end
 
-local function cmdDisembowel()
-    return wieldPrefix() .. "wipe " .. w1() .. "/wipe " .. w2() .. "/" ..
-               cmdAssess() .. "/disembowel " .. target
+-- 002_BASIC_2
+local function venoms_basic(s, d)
+  local v = {}
+  local function ins(x) v[#v + 1] = x end
+  local function a(n) return aff_present(s, n) end
+  if a("slickness") and not a("anorexia") and a("paralysis") and not a("stupidity") and
+    a("asthma") and not s.rebounding then
+    ins("ACONITE"); ins("SLIKE")
+  end
+  if a("impatience") and not a("anorexia") and not a("slickness") and a("asthma") then
+    ins("SLIKE"); ins("GECKO")
+  end
+  if a("impatience") and not a("anorexia") then -- and not tBals.salve
+    ins("SLIKE")
+  end
+  if a("anorexia") and not a("dizziness") then ins("LARKSPUR") end
+  if a("anorexia") and not a("recklessness") then ins("EURYPTERIA") end
+  if a("anorexia") and not a("shyness") then ins("DIGITALIS") end
+  if not a("paralysis") then ins("CURARE") end
+  if not a("weariness") then ins("VERNALIUS") end
+  if not a("asthma") then ins("KALMIA") end
+  if not a("clumsiness") then ins("XENTIO") end
+  if not a("slickness") and a("asthma") and v[1] == "CURARE" then ins("GECKO") end
+  if not a("recklessness") then ins("EURYPTERIA") end
+  if not a("stupidity") then ins("ACONITE") end
+  if not a("dizziness") then ins("LARKSPUR") end
+  if a("asthma") and not a("disloyalty") then ins("MONKSHOOD") end
+  if not a("shyness") then ins("DIGITALIS") end
+  if not a("sensitivity") then ins("PREFARAR"); ins("PREFARAR") end
+  if not a("addiction") then ins("VARDRAX") end
+  if not a("darkshade") then ins("DARKSHADE") end
+  return v
 end
 
-local function cmdBisect()
-    return "wield shield " .. runewarden.dwc.CONFIG.bisectWeaponId .. "/" ..
-               cmdAssess() .. "/bisect " .. target .. " curare"
+-- 001_RIFT
+local function venoms_rift(s, d)
+  local v = {}
+  local function ins(x) v[#v + 1] = x end
+  local function a(n) return aff_present(s, n) end
+  if M.state.salve_down and a("addiction") then -- tBals.salve == false and tAffs.addiciton
+    ins("EPTETH"); ins("EPTETH")
+  end
+  if (d.prepped_leftleg and d.prepped_rightleg) and d.damagedtorso and not a("prone") and
+    not s.rebounding and not s.shield then
+    ins("DELPHINIUM"); ins("DELPHINIUM")
+  end
+  if (d.prepped_leftleg or d.prepped_rightleg) and d.prepped_head and not a("prone") and
+    not s.rebounding and not s.shield then
+    ins("DELPHINIUM"); ins("DELPHINIUM")
+  end
+  -- Levi typo `not tAffs.stupid` (no such key) => always true; reproduced faithfully.
+  if a("slickness") and not a("anorexia") and a("paralysis") and not a("stupid") then
+    ins("ACONITE"); ins("SLIKE")
+  end
+  if a("impatience") and not a("anorexia") and not a("slickness") then
+    ins("SLIKE"); ins("GECKO")
+  end
+  if a("impatience") and not a("anorexia") then -- and not tBals.salve
+    ins("SLIKE")
+  end
+  if d.damagedhead and not a("stupidity") then ins("ACONITE") end
+  if d.damagedhead and not a("dizziness") then ins("LARKSPUR") end
+  if d.damagedhead and not a("recklessness") then ins("EURYPTERIA") end
+  if d.damagedhead and not a("shyness") then ins("DIGITALIS") end
+  if not a("paralysis") then ins("CURARE") end
+  if not a("addiction") then ins("VARDRAX") end
+  if not a("weariness") then ins("VERNALIUS") end
+  if not a("asthma") then ins("KALMIA") end
+  if not a("clumsiness") then ins("XENTIO") end
+  if not a("slickness") and a("asthma") and v[1] == "CURARE" then ins("GECKO") end
+  if not a("nausea") then ins("EUPHORBIA") end
+  if not a("dizziness") then ins("LARKSPUR") end
+  if not a("stupidity") then ins("ACONITE") end
+  if not a("recklessness") then ins("EURYPTERIA") end
+  if not a("shyness") then ins("DIGITALIS") end
+  if not a("sensitivity") then ins("PREFARAR"); ins("PREFARAR") end
+  if not a("darkshade") then ins("DARKSHADE") end
+  return v
 end
 
--- ============================================================
---  PRE-DISPATCH GATES (shared by every mode)
--- ============================================================
--- Returns true if the tick should be skipped.
-local function preGate(fn)
-    if not target or target == "" then
-        return true
-    end
-    if isPaused() then
-        return true
-    end
-    if runewarden.dwc.reboundGate(fn) then
-        return true
-    end
-    if selfLockBreak() then
-        return true
-    end -- handled lock break; skip this tick
-    if selfAff("stupidity") then
-        return true
-    end -- can't dispatch a stupid build
-    return false
+-- =============================================================
+-- Plan: Disembowel-Prep (003 / dwcprioslimb) -- DEFAULT
+-- =============================================================
+local function plan_disembowel(s, d)
+  local t = s.target
+  local function a(n) return aff_present(s, n) end
+  local venoms = venoms_disembowel(s, d)
+
+  -- Limb target pick
+  local targetlimb
+  if not d.damagedtorso then
+    targetlimb = "TORSO"
+  elseif not d.prepped_rightleg then
+    targetlimb = "RIGHT LEG"
+  elseif d.prepped_rightleg and not d.prepped_leftleg then
+    targetlimb = "LEFT LEG"
+  else
+    targetlimb = "TORSO" -- fallback (Levi leaves stale; default torso)
+  end
+
+  -- Raze flags (axedamage-vs-scimdamage margin: a slash would over/under-break)
+  local rl, ra = get_limb_damage("right leg"), get_limb_damage("right arm")
+  local ll, la = get_limb_damage("left leg"), get_limb_damage("left arm")
+  local need_raze = s.rebounding or s.shield
+  local need_raze2 =
+    (rl + d.scimdamage >= 100 and rl + d.axedamage < 100 and targetlimb == "RIGHT LEG") or
+    (ra + d.scimdamage >= 100 and ra + d.axedamage < 100 and targetlimb == "RIGHT ARM")
+  local need_raze3 =
+    (ll + d.scimdamage >= 100 and ll + d.axedamage < 100 and targetlimb == "LEFT LEG") or
+    (la + d.scimdamage >= 100 and la + d.axedamage < 100 and targetlimb == "LEFT ARM")
+
+  local use_bisect = hp_pct(s) <= 0.35
+  local disembowel = s.impaled
+
+  -- Bisect short-circuits the whole batch (dispatch form). The live Levi dispatch
+  -- (003:333) fires on use_bisect alone -- BISECT ignores shield -- so no shield gate.
+  if use_bisect then
+    return bisect_dispatch(s)
+  end
+
+  -- Build the attack body.
+  local atk
+  if disembowel then
+    atk = {"DISEMBOWEL " .. t}
+  elseif a("prone") and d.damagedleftleg then
+    atk = ww(s); extend(atk, {"IMPALE " .. t, "FURY ON"})
+  elseif ll + d.scimdamage >= 101 or d.damagedleftleg then
+    -- (Levi omits the ASSESS on this second impale branch.)
+    local w1, w2 = M.config.weapon1, M.config.weapon2
+    atk = {"WIELD " .. w1 .. " " .. w2, "WIPE " .. w1, "WIPE " .. w2, "IMPALE " .. t, "FURY ON"}
+  elseif need_raze then
+    atk = ww(s); atk[#atk + 1] = razeslash(s, targetlimb, venoms[1])
+  elseif need_raze2 then
+    atk = ww(s); atk[#atk + 1] = razeslash(s, targetlimb, venoms[1])
+  elseif need_raze3 then
+    atk = ww(s); atk[#atk + 1] = razeslash(s, targetlimb, venoms[1])
+  elseif not d.damagedrightleg and a("nausea") and not s.rebounding and not s.shield and
+    d.prepped_rightleg and d.prepped_leftleg and not a("prone") and d.damagedtorso then
+    atk = ww(s); atk[#atk + 1] = dsl(s, "RIGHT LEG", "DELPHINIUM", "DELPHINIUM")
+  elseif d.damagedrightleg and not s.rebounding and not s.shield and d.prepped_leftleg and
+    d.damagedtorso and not a("slickness") then
+    atk = ww(s); atk[#atk + 1] = dsl(s, "LEFT LEG", "GECKO", "CURARE")
+  elseif d.damagedrightleg and not s.rebounding and not s.shield and d.prepped_leftleg and
+    d.damagedtorso and a("slickness") then
+    atk = ww(s); atk[#atk + 1] = dsl(s, "LEFT LEG", "EPTETH", "CURARE")
+  elseif a("nausea") and (not d.prepped_leftleg or not d.prepped_rightleg) then
+    atk = ww(s); atk[#atk + 1] = dsl(s, targetlimb, venoms[2], venoms[1])
+  elseif a("nausea") and not d.damagedtorso then
+    atk = ww(s); atk[#atk + 1] = dsl(s, "TORSO", venoms[2], venoms[1])
+  else
+    atk = ww(s); atk[#atk + 1] = dsl(s, nil, venoms[2], venoms[1])
+  end
+
+  -- Dispatch wrap (003): falcon (gated) -> atk -> engage -> assess.
+  local out = {}
+  if not s.engaged and M.state.need_falcon then
+    out[#out + 1] = "FALCON SLAY " .. t
+  end
+  extend(out, atk)
+  if not s.engaged then
+    out[#out + 1] = "ENGAGE " .. t
+  end
+  out[#out + 1] = "ASSESS " .. t
+  return out
 end
 
--- Build the appropriate engage suffix and queue type, then send.
-local function dispatchAttack(atk, opts)
-    opts = opts or {}
-    local queueType = opts.queueType or "FREE"
-    local engaged = runewarden.dwc.state.engaged
-    local tail = ""
+-- =============================================================
+-- Plan: Head-Prep (004 / dwcpriosheadprep)
+-- =============================================================
+local function plan_head(s, d)
+  local t = s.target
+  local function a(n) return aff_present(s, n) end
+  local venoms = venoms_head(s, d)
 
-    if opts.bisect then
-        -- 003/004 bisect path always reissues engage
-        tail = "/engage " .. target
-        sendAttack(atk .. tail, queueType)
-        return
-    end
+  -- Limb target pick
+  local targetlimb
+  if not d.prepped_head then
+    targetlimb = "HEAD"
+  elseif not d.prepped_rightleg then
+    targetlimb = "RIGHT LEG"
+  elseif d.damagedrightleg and not d.damagedhead and d.prepped_head then
+    targetlimb = "HEAD"
+  elseif d.prepped_rightleg and not d.prepped_leftleg then
+    targetlimb = "LEFT LEG"
+  else
+    targetlimb = "HEAD" -- fallback
+  end
 
-    if not engaged then
-        local pre = opts.falconPrefix or ""
-        local post = opts.engageSuffix or ("/engage " .. target)
-        sendAttack(pre .. atk .. post, queueType)
-    else
-        sendAttack(atk, queueType)
-    end
+  local rl, ra = get_limb_damage("right leg"), get_limb_damage("right arm")
+  local ll, la = get_limb_damage("left leg"), get_limb_damage("left arm")
+  local need_raze = s.rebounding or s.shield
+  local need_raze2 =
+    (rl + d.scimdamage >= 100 and rl + d.axedamage < 100 and targetlimb == "RIGHT LEG") or
+    (ra + d.scimdamage >= 100 and ra + d.axedamage < 100 and targetlimb == "RIGHT ARM")
+  local need_raze3 =
+    (ll + d.scimdamage >= 100 and ll + d.axedamage < 100 and targetlimb == "LEFT LEG") or
+    (la + d.scimdamage >= 100 and la + d.axedamage < 100 and targetlimb == "LEFT ARM")
+
+  local use_bisect = hp_pct(s) <= 0.35
+  local disembowel = s.impaled
+
+  -- BISECT ignores shield; the live Levi dispatch (004:363) fires on use_bisect alone.
+  if use_bisect then
+    return bisect_dispatch(s)
+  end
+
+  local atk
+  if disembowel then
+    atk = {"DISEMBOWEL " .. t}
+  elseif need_raze then
+    atk = ww(s); atk[#atk + 1] = razeslash(s, targetlimb, venoms[1])
+  elseif need_raze2 then
+    atk = ww(s); atk[#atk + 1] = razeslash(s, targetlimb, venoms[1])
+  elseif need_raze3 then
+    atk = ww(s); atk[#atk + 1] = razeslash(s, targetlimb, venoms[1])
+  elseif a("prone") and d.damagedleftleg then
+    atk = ww(s); extend(atk, {"FURY ON", "IMPALE " .. t})
+  elseif not d.damagedrightleg and a("nausea") and not s.rebounding and not s.shield and
+    d.prepped_rightleg then
+    atk = ww(s); atk[#atk + 1] = dsl(s, "RIGHT LEG", "DELPHINIUM", "DELPHINIUM")
+  elseif d.damagedrightleg and not s.rebounding and not s.shield and d.prepped_head then
+    atk = ww(s); atk[#atk + 1] = dsl(s, "HEAD", "SLIKE", "ACONITE") -- the head crack
+  elseif a("nausea") and not s.rebounding and not s.shield and d.damagedhead then
+    atk = ww(s); atk[#atk + 1] = dsl(s, "HEAD", venoms[2], venoms[1])
+  elseif d.damagedrightleg and not s.rebounding and not s.shield and d.prepped_leftleg and
+    d.damagedtorso and not a("slickness") then
+    atk = ww(s); atk[#atk + 1] = dsl(s, "LEFT LEG", "GECKO", "CURARE")
+  elseif d.damagedrightleg and not s.rebounding and not s.shield and d.prepped_leftleg and
+    d.damagedtorso and a("slickness") then
+    atk = ww(s); atk[#atk + 1] = dsl(s, "LEFT LEG", "EPTETH", "CURARE")
+  elseif a("nausea") and (not d.prepped_leftleg or not d.prepped_rightleg) then
+    atk = ww(s); atk[#atk + 1] = dsl(s, targetlimb, venoms[2], venoms[1])
+  elseif a("nausea") and not d.damagedtorso then
+    atk = ww(s); atk[#atk + 1] = dsl(s, "TORSO", venoms[2], venoms[1])
+  else
+    atk = ww(s); atk[#atk + 1] = dsl(s, nil, venoms[2], venoms[1])
+  end
+
+  -- Dispatch wrap (004): EMPOWER -> falcon (gated) -> atk -> engage -> assess -> contemplate.
+  local out = {"EMPOWER PRIORITY SET " .. M.config.empower_runes}
+  if not s.engaged and M.state.need_falcon then
+    out[#out + 1] = "FALCON SLAY " .. t
+  end
+  extend(out, atk)
+  if not s.engaged then
+    out[#out + 1] = "ENGAGE " .. t
+  end
+  out[#out + 1] = "ASSESS " .. t
+  out[#out + 1] = "CONTEMPLATE " .. t
+  return out
 end
 
--- ============================================================
---  ============== MODE 1: RIFTLOCK (was 001_RIFT.lua) ==========
--- ============================================================
--- Riftlock = anti-Restore lock build. When target lost salve balance AND
--- has addiction (vardrax landed, blocking dust/herb rifting), spam
--- epteth/epteth to break both arms, completing salvelock.
---
--- Venom priority cascade (later overrides earlier — matches original):
---   1.  !addiction              -> vardrax
---   2.  !weariness              -> vernalius
---   3.  !asthma                 -> kalmia
---   4.  !clumsiness             -> xentio
---   5.  !slickness + asthma + venoms[1]==curare  -> gecko (2nd slot)
---   6.  !nausea                 -> euphorbia
---   7.  !dizziness              -> larkspur
---   8.  !stupidity              -> aconite
---   9.  !recklessness           -> eurypteria
---   10. !shyness                -> digitalis
---   11. !sensitivity            -> prefarar x2
---   12. !darkshade              -> darkshade
---
--- Plus precondition inserts at the top of the table for the riftlock setup:
---   - !salve_bal + addiction    -> epteth, epteth   (the kill route)
---   - both legs prepped + dmg torso + ...sleeplock conditions -> delphinium x2
---   - one leg + head prepped + ...sleeplock conditions        -> delphinium x2
---   - slickness + !anorexia + paralysis + !stupidity          -> aconite, slike
---   - impatience + !anorexia + !slickness                     -> slike, gecko
---   - impatience + !anorexia + !salve_bal                     -> slike
---   - dmgHead + !stupidity                                    -> aconite
---   - dmgHead + !dizziness                                    -> larkspur
---   - dmgHead + !recklessness                                 -> eurypteria
---   - dmgHead + !shyness                                      -> digitalis
---
--- The first two slots of the venoms[] table feed dsl <v1> <v2>.
-function runewarden.dwc.riftlock()
-    if preGate(runewarden.dwc.riftlock) then
-        return
-    end
+-- =============================================================
+-- Plan: Basic (002 / dwcpriosbasic)
+-- =============================================================
+local function plan_basic(s, d)
+  local t = s.target
+  local function a(n) return aff_present(s, n) end
 
-    local p = calcPrepped()
-    local targetlimb = resolveLimb("riftlock", p, "right arm")
-    local venoms = {}
+  -- Nausea hand-off to the disembowel-prep plan (Levi calls dwcprioslimb()).
+  -- We return its result directly (Levi's fall-through double-sent a stray batch).
+  if a("nausea") and not d.prepped_rightleg and not a("prone") then
+    return plan_disembowel(s, d)
+  elseif a("nausea") and not d.prepped_leftleg and not a("prone") then
+    return plan_disembowel(s, d)
+  elseif a("nausea") and not d.prepped_torso then
+    return plan_disembowel(s, d)
+  end
 
-    -- Precondition inserts (highest priority — head of table)
-    if targetBalDown("salve") and has("addiction") then
-        table.insert(venoms, "epteth")
-        table.insert(venoms, "epteth")
-    end
+  local venoms = venoms_basic(s, d)
+  local disembowel = s.impaled and is_limb_broken("torso")
+  local need_raze = s.rebounding or s.shield
+  local use_bisect = (hp_pct(s) <= 0.35 and not s.shield) or a("healthleech")
 
-    if p.leftleg and p.rightleg and has("damagedtorso") and not has("prone") and
-        not has("rebounding") and not has("shield") then
-        table.insert(venoms, "delphinium")
-        table.insert(venoms, "delphinium")
-    end
+  local atk
+  if use_bisect then
+    atk = bisect_body(s)
+  elseif disembowel then
+    atk = ww(s); atk[#atk + 1] = "DISEMBOWEL " .. t
+  elseif need_raze then
+    atk = ww(s); atk[#atk + 1] = razeslash(s, nil, venoms[1])
+  elseif a("prone") and d.damagedtorso and d.damagedrightleg and d.damagedleftleg then
+    atk = ww(s); extend(atk, {"ASSESS " .. t, "IMPALE " .. t})
+  elseif not s.rebounding and not s.shield and d.prepped_head and a("prone") then
+    atk = ww(s); atk[#atk + 1] = dsl(s, "HEAD", "GECKO", "CURARE")
+  elseif not d.damagedrightleg and a("nausea") and not s.rebounding and not s.shield and
+    d.prepped_rightleg and d.prepped_leftleg and not a("prone") and d.prepped_torso then
+    atk = ww(s); atk[#atk + 1] = dsl(s, "RIGHT LEG", "DELPHINIUM", "DELPHINIUM")
+  elseif venoms[1] == "CURARE" then
+    atk = ww(s); atk[#atk + 1] = dsl(s, nil, venoms[2], venoms[1])
+  else
+    atk = ww(s); atk[#atk + 1] = dsl(s, nil, venoms[1], venoms[2])
+  end
 
-    if (p.leftleg or p.rightleg) and p.head and not has("prone") and
-        not has("rebounding") and not has("shield") then
-        table.insert(venoms, "delphinium")
-        table.insert(venoms, "delphinium")
-    end
-
-    if has("slickness") and not has("anorexia") and has("paralysis") and
-        not has("stupidity") then
-        table.insert(venoms, "aconite")
-        table.insert(venoms, "slike")
-    end
-
-    if has("impatience") and not has("anorexia") and not has("slickness") then
-        table.insert(venoms, "slike")
-        table.insert(venoms, "gecko")
-    end
-
-    if has("impatience") and not has("anorexia") and not targetBalDown("salve") then
-        table.insert(venoms, "slike")
-    end
-
-    if has("damagedhead") and not has("stupidity") then
-        table.insert(venoms, "aconite")
-    end
-    if has("damagedhead") and not has("dizziness") then
-        table.insert(venoms, "larkspur")
-    end
-    if has("damagedhead") and not has("recklessness") then
-        table.insert(venoms, "eurypteria")
-    end
-    if has("damagedhead") and not has("shyness") then
-        table.insert(venoms, "digitalis")
-    end
-
-    -- Standard venom cascade (lock/pressure builders)
-    if not has("paralysis") then
-        table.insert(venoms, "curare")
-    end
-    if not has("addiction") then
-        table.insert(venoms, "vardrax")
-    end
-    if not has("weariness") then
-        table.insert(venoms, "vernalius")
-    end
-    if not has("asthma") then
-        table.insert(venoms, "kalmia")
-    end
-    if not has("clumsiness") then
-        table.insert(venoms, "xentio")
-    end
-    if not has("slickness") and has("asthma") and venoms[1] == "curare" then
-        table.insert(venoms, "gecko")
-    end
-    if not has("nausea") then
-        table.insert(venoms, "euphorbia")
-    end
-    if not has("dizziness") then
-        table.insert(venoms, "larkspur")
-    end
-    if not has("stupidity") then
-        table.insert(venoms, "aconite")
-    end
-    if not has("recklessness") then
-        table.insert(venoms, "eurypteria")
-    end
-    if not has("shyness") then
-        table.insert(venoms, "digitalis")
-    end
-    if not has("sensitivity") then
-        table.insert(venoms, "prefarar")
-        table.insert(venoms, "prefarar")
-    end
-    if not has("darkshade") then
-        table.insert(venoms, "darkshade")
-    end
-
-    -- Attack selection
-    local useBisect = (targetHpPct() <= runewarden.dwc.CONFIG.bisectHpThresh)
-    local disembowel = has("impaled") and getLimbDamage("torso") >= 100
-    local needRaze = has("rebounding") or has("shield")
-    local needRaze2 = needRazeForLimb(targetlimb, p) and
-                          (targetlimb == "right leg" or targetlimb == "right arm")
-    local needRaze3 = needRazeForLimb(targetlimb, p) and
-                          (targetlimb == "left leg" or targetlimb == "left arm")
-
-    local atk
-    if useBisect then
-        atk = cmdBisect()
-    elseif disembowel then
-        atk = cmdDisembowel()
-    elseif needRaze or needRaze2 or needRaze3 then
-        atk = cmdRazeslash(targetlimb, venoms[1])
-    elseif has("prone") and has("damagedtorso") and has("damagedrightleg") and
-        has("damagedleftleg") then
-        atk = cmdImpale(false)
-    elseif targetBalDown("salve") and has("addiction") then
-        -- Riftlock kill route
-        atk = cmdDsl(targetlimb, "epteth", "epteth")
-    else
-        -- Original 001_RIFT.lua:349 slashes the resolved targetlimb here; the
-        -- first port pass dropped it to a no-limb dsl. With per-mode auto-pick,
-        -- targetlimb is now the salvelock arm, so restore the limbed dsl.
-        atk = cmdDsl(targetlimb, venoms[1] or "curare", venoms[2] or "kalmia")
-    end
-
-    dispatchAttack(atk)
+  -- Dispatch wrap (002): falcon (always) -> atk -> engage -> assess.
+  local out = {"FALCON SLAY " .. t}
+  extend(out, atk)
+  if not s.engaged then
+    out[#out + 1] = "ENGAGE " .. t
+  end
+  out[#out + 1] = "ASSESS " .. t
+  return out
 end
 
--- ============================================================
---  ============== MODE 2: BASIC (was 002_BASIC_2.lua) ==========
--- ============================================================
--- Neutral DWC pressure. Falls back to disembowel mode when nausea is up and
--- legs/torso aren't prepped (i.e. we need to build limb damage first).
--- Healthleech bumps the bisect threshold (treated as low-HP for kill purposes).
-function runewarden.dwc.basic()
-    if preGate(runewarden.dwc.basic) then
-        return
-    end
+-- =============================================================
+-- Plan: Rift (001 / runie_riftlock)
+-- =============================================================
+local function plan_rift(s, d)
+  local t = s.target
+  local function a(n) return aff_present(s, n) end
+  local venoms = venoms_rift(s, d)
 
-    local p = calcPrepped()
-    local targetlimb = resolveLimb("basic", p, "torso")
-    local venoms = {}
+  -- Levi never assigns targetlimb here (relied on a stale global); use the
+  -- disembowel-prep pick so the raze/dsl branches have a valid limb.
+  local targetlimb
+  if not d.damagedtorso then
+    targetlimb = "TORSO"
+  elseif not d.prepped_rightleg then
+    targetlimb = "RIGHT LEG"
+  elseif d.prepped_rightleg and not d.prepped_leftleg then
+    targetlimb = "LEFT LEG"
+  else
+    targetlimb = "TORSO"
+  end
 
-    -- Setup venom inserts (high priority — head of table)
-    if has("slickness") and not has("anorexia") and has("paralysis") and
-        not has("stupidity") and has("asthma") and not has("rebounding") then
-        table.insert(venoms, "aconite")
-        table.insert(venoms, "slike")
-    end
-    if has("impatience") and not has("anorexia") and not has("slickness") and
-        has("asthma") then
-        table.insert(venoms, "slike")
-        table.insert(venoms, "gecko")
-    end
-    if has("impatience") and not has("anorexia") and not targetBalDown("salve") then
-        table.insert(venoms, "slike")
-    end
+  local rl, ra = get_limb_damage("right leg"), get_limb_damage("right arm")
+  local ll, la = get_limb_damage("left leg"), get_limb_damage("left arm")
+  local need_raze = s.rebounding or s.shield
+  local need_raze2 =
+    (rl + d.scimdamage >= 100 and rl + d.axedamage < 100 and targetlimb == "RIGHT LEG") or
+    (ra + d.scimdamage >= 100 and ra + d.axedamage < 100 and targetlimb == "RIGHT ARM")
+  local need_raze3 =
+    (ll + d.scimdamage >= 100 and ll + d.axedamage < 100 and targetlimb == "LEFT LEG") or
+    (la + d.scimdamage >= 100 and la + d.axedamage < 100 and targetlimb == "LEFT ARM")
 
-    if has("anorexia") and not has("dizziness") then
-        table.insert(venoms, "larkspur")
-    end
-    if has("anorexia") and not has("recklessness") then
-        table.insert(venoms, "eurypteria")
-    end
-    if has("anorexia") and not has("shyness") then
-        table.insert(venoms, "digitalis")
-    end
+  local use_bisect = hp_pct(s) <= 0.35
+  local disembowel = s.impaled and is_limb_broken("torso")
 
-    -- Standard cascade
-    if not has("paralysis") then
-        table.insert(venoms, "curare")
-    end
-    if not has("weariness") then
-        table.insert(venoms, "vernalius")
-    end
-    if not has("asthma") then
-        table.insert(venoms, "kalmia")
-    end
-    if not has("clumsiness") then
-        table.insert(venoms, "xentio")
-    end
-    if not has("slickness") and has("asthma") and venoms[1] == "curare" then
-        table.insert(venoms, "gecko")
-    end
-    if not has("recklessness") then
-        table.insert(venoms, "eurypteria")
-    end
-    if not has("stupidity") then
-        table.insert(venoms, "aconite")
-    end
-    if not has("dizziness") then
-        table.insert(venoms, "larkspur")
-    end
-    if has("asthma") and not has("disloyalty") then
-        table.insert(venoms, "monkshood")
-    end
-    if not has("shyness") then
-        table.insert(venoms, "digitalis")
-    end
-    if not has("sensitivity") then
-        table.insert(venoms, "prefarar")
-        table.insert(venoms, "prefarar")
-    end
-    if not has("addiction") then
-        table.insert(venoms, "vardrax")
-    end
-    if not has("darkshade") then
-        table.insert(venoms, "darkshade")
-    end
+  local atk
+  if use_bisect then
+    atk = bisect_body(s)
+  elseif disembowel then
+    atk = ww(s); atk[#atk + 1] = "DISEMBOWEL " .. t
+  elseif need_raze then
+    atk = ww(s); atk[#atk + 1] = razeslash(s, targetlimb, venoms[1])
+  elseif need_raze2 then
+    atk = ww(s); atk[#atk + 1] = razeslash(s, targetlimb, venoms[1])
+  elseif need_raze3 then
+    atk = ww(s); atk[#atk + 1] = razeslash(s, targetlimb, venoms[1])
+  elseif a("prone") and d.damagedtorso and d.damagedrightleg and d.damagedleftleg then
+    atk = ww(s); atk[#atk + 1] = "IMPALE " .. t
+  elseif M.state.salve_down and a("addiction") then -- tBals.salve == false and tAffs.addiction
+    atk = ww(s); atk[#atk + 1] = dsl(s, targetlimb, "EPTETH", "EPTETH")
+  else
+    atk = ww(s); atk[#atk + 1] = dsl(s, targetlimb, venoms[1], venoms[2])
+  end
 
-    -- Delegation: nausea up + unprepped torso/legs -> defer to disembowel mode
-    -- (the original dwcprioslimb() recurses into 003's logic).
-    if has("nausea") and not p.rightleg and not has("prone") then
-        return runewarden.dwc.disembowel()
-    end
-    if has("nausea") and not p.leftleg and not has("prone") then
-        return runewarden.dwc.disembowel()
-    end
-    if has("nausea") and not p.torso then
-        return runewarden.dwc.disembowel()
-    end
-
-    -- Attack selection
-    local useBisect = ((targetHpPct() <= runewarden.dwc.CONFIG.bisectHpThresh) and
-                         not has("shield")) or has("healthleech")
-    local disembowel = has("impaled") and getLimbDamage("torso") >= 100
-    local needRaze = has("rebounding") or has("shield")
-    local needRaze2 = needRazeForLimb(targetlimb, p) and
-                          (targetlimb == "right leg" or targetlimb == "right arm")
-    local needRaze3 = needRazeForLimb(targetlimb, p) and
-                          (targetlimb == "left leg" or targetlimb == "left arm")
-
-    local atk
-    if useBisect then
-        atk = cmdBisect()
-    elseif disembowel then
-        atk = cmdDisembowel()
-    elseif needRaze or needRaze2 or needRaze3 then
-        -- Follow the disembowel limb path: raze the picked limb. (002 originally
-        -- dropped the limb arg; basic now aims it, like disembowel/riftlock.)
-        atk = cmdRazeslash(targetlimb, venoms[1] or "curare")
-    elseif has("prone") and has("damagedtorso") and has("damagedrightleg") and
-        has("damagedleftleg") then
-        atk = cmdImpale(false)
-    elseif not has("rebounding") and not has("shield") and p.head and
-        has("prone") then
-        atk = cmdDsl("head", "gecko", "curare")
-    elseif not has("damagedrightleg") and has("nausea") and not has("rebounding") and
-        not has("shield") and p.rightleg and p.leftleg and not has("prone") and
-        p.torso then
-        atk = cmdDsl("right leg", "delphinium", "delphinium")
-    elseif venoms[1] == "curare" then
-        -- Follow the disembowel limb path: slash the picked limb (was no-limb).
-        atk = cmdDsl(targetlimb, venoms[2] or "kalmia", venoms[1])
-    else
-        atk = cmdDsl(targetlimb, venoms[1] or "curare", venoms[2] or "kalmia")
-    end
-
-    -- 002's send prepends `falcon slay <target>;` always
-    local falcon = "falcon slay " .. target .. "/"
-    dispatchAttack(atk, {falconPrefix = falcon, engageSuffix = "/engage " .. target .. "/" .. cmdAssess()})
+  -- Dispatch wrap (001): atk -> engage (no falcon, no trailing assess).
+  local out = {}
+  extend(out, atk)
+  if not s.engaged then
+    out[#out + 1] = "ENGAGE " .. t
+  end
+  return out
 end
 
--- ============================================================
---  ============== MODE 3: DISEMBOWEL (was 003_Disembowel_Prep) ==
--- ============================================================
--- Torso-focused limb prep with auto-pick of targetlimb (torso → right leg →
--- left leg). Aggressive impale on prone+single-leg. Used as both a standalone
--- mode and the fallback for basic() under nausea+unprepped.
-function runewarden.dwc.disembowel()
-    if preGate(runewarden.dwc.disembowel) then
-        return
-    end
-
-    local p = calcPrepped()
-    local venoms = {}
-
-    -- Setup inserts (head of table)
-    if p.leftleg and p.rightleg and has("damagedtorso") and not has("prone") and
-        not has("rebounding") and not has("shield") then
-        table.insert(venoms, "delphinium")
-        table.insert(venoms, "delphinium")
-    end
-    if (p.leftleg or p.rightleg) and p.head and not has("prone") and
-        not has("rebounding") and not has("shield") then
-        table.insert(venoms, "delphinium")
-        table.insert(venoms, "delphinium")
-    end
-    if has("impatience") and not has("anorexia") and not has("slickness") and
-        has("asthma") then
-        table.insert(venoms, "slike")
-        table.insert(venoms, "gecko")
-    end
-    if has("impatience") and not has("anorexia") and not targetBalDown("salve") then
-        table.insert(venoms, "slike")
-    end
-    if has("slickness") and not has("anorexia") and not has("stupidity") and
-        has("asthma") then
-        table.insert(venoms, "aconite")
-        table.insert(venoms, "slike")
-    end
-    if has("anorexia") and not has("dizziness") then
-        table.insert(venoms, "larkspur")
-    end
-    if has("anorexia") and not has("stupidity") then
-        table.insert(venoms, "aconite")
-    end
-    if has("anorexia") and not has("shyness") then
-        table.insert(venoms, "digitalis")
-    end
-    if has("anorexia") and not has("recklessness") then
-        table.insert(venoms, "eurypteria")
-    end
-
-    -- Standard cascade
-    if not has("paralysis") then
-        table.insert(venoms, "curare")
-    end
-    if not has("nausea") then
-        table.insert(venoms, "vernalius")
-    end
-    if not has("asthma") then
-        table.insert(venoms, "kalmia")
-    end
-    if not has("clumsiness") then
-        table.insert(venoms, "xentio")
-    end
-    if not has("slickness") and has("asthma") and venoms[1] == "curare" then
-        table.insert(venoms, "gecko")
-    end
-    if not has("addiction") then
-        table.insert(venoms, "vardrax")
-    end
-    if not has("sensitivity") and has("deaf") then
-        table.insert(venoms, "prefarar")
-        table.insert(venoms, "prefarar")
-    end
-    if not has("sensitivity") and not has("deaf") then
-        table.insert(venoms, "prefarar")
-    end
-    if not has("recklessness") then
-        table.insert(venoms, "eurypteria")
-    end
-    if not has("stupidity") then
-        table.insert(venoms, "aconite")
-    end
-    if not has("dizziness") then
-        table.insert(venoms, "larkspur")
-    end
-    if not has("shyness") then
-        table.insert(venoms, "digitalis")
-    end
-    if not has("brokenrightarm") then
-        table.insert(venoms, "epteth")
-    end
-    if not has("brokenleftarm") then
-        table.insert(venoms, "epteth")
-    end
-    if not has("darkshade") then
-        table.insert(venoms, "darkshade")
-    end
-
-    -- Auto-pick target limb (torso → right leg → left leg)
-    local targetlimb
-    if not has("damagedtorso") then
-        targetlimb = "torso"
-    elseif not p.rightleg then
-        targetlimb = "right leg"
-    elseif p.rightleg and not p.leftleg then
-        targetlimb = "left leg"
-    else
-        targetlimb = getTargetLimb("torso")
-    end
-
-    -- Attack selection
-    local php = vital("hp") > 0 and
-                    math.floor(vital("hp") / vital("maxhp") * 100) or 100
-    local useBisect = php <= runewarden.dwc.CONFIG.bisectHpThresh
-    local disembowel = has("impaled") or rawget(_G, "timpale") == true
-    local needRaze = has("rebounding") or has("shield")
-    local needRaze2 = needRazeForLimb(targetlimb, p) and
-                          (targetlimb == "right leg" or targetlimb == "right arm")
-    local needRaze3 = needRazeForLimb(targetlimb, p) and
-                          (targetlimb == "left leg" or targetlimb == "left arm")
-
-    local atk
-    local queueType = "FREE"
-    local engaged = runewarden.dwc.state.engaged
-    local needFalcon = runewarden.dwc.state.needFalcon
-
-    if useBisect and not has("shield") then
-        atk = cmdBisect()
-    elseif disembowel then
-        atk = ";disembowel " .. target
-    elseif has("prone") and has("damagedleftleg") then
-        atk = wieldPrefix() .. cmdAssess() .. "/impale " .. target .. "/fury on"
-    elseif p.hits.ll + p.scim >= 101 or has("damagedleftleg") then
-        atk = wieldPrefix() .. "impale " .. target .. "/fury on"
-    elseif needRaze or needRaze2 or needRaze3 then
-        atk = cmdRazeslash(targetlimb, venoms[1])
-    elseif not has("damagedrightleg") and has("nausea") and not has("rebounding") and
-        not has("shield") and p.rightleg and p.leftleg and not has("prone") and
-        has("damagedtorso") then
-        atk = cmdDsl("right leg", "delphinium", "delphinium")
-    elseif has("damagedrightleg") and not has("rebounding") and not has("shield") and
-        p.leftleg and has("damagedtorso") and not has("slickness") then
-        atk = cmdDsl("left leg", "gecko", "curare")
-    elseif has("damagedrightleg") and not has("rebounding") and not has("shield") and
-        p.leftleg and has("damagedtorso") and has("slickness") then
-        atk = cmdDsl("left leg", "epteth", "curare")
-    elseif has("nausea") and (not p.leftleg or not p.rightleg) then
-        atk = cmdDsl(targetlimb, venoms[2] or "kalmia", venoms[1] or "curare")
-    elseif has("nausea") and not has("damagedtorso") then
-        atk = cmdDsl("torso", venoms[2] or "kalmia", venoms[1] or "curare")
-    else
-        atk = cmdDsl(nil, venoms[2] or "kalmia", venoms[1] or "curare")
-    end
-
-    -- 003's dispatch has its own send variants
-    if useBisect then
-        -- Specifically: "wield bastard;grip;assess;bisect;engage" (no DSL prefix)
-        sendAttack("wield " .. runewarden.dwc.CONFIG.bisectWeaponId ..
-                       "/grip/" .. cmdAssess() .. "/bisect " .. target ..
-                       " curare/engage " .. target, queueType)
-        return
-    end
-    if not engaged and needFalcon then
-        sendAttack("falcon slay " .. target .. "/" .. atk .. "/engage " ..
-                       target .. "/" .. cmdAssess(), queueType)
-    elseif not engaged then
-        sendAttack(atk .. "/engage " .. target .. "/" .. cmdAssess(), queueType)
-    else
-        sendAttack(atk .. "/" .. cmdAssess(), queueType)
-    end
-end
-
--- ============================================================
---  ============== MODE 4: HEADPREP (was 004_Head_Prep.lua) =====
--- ============================================================
--- Head-focused mental stack: prep head + one leg, then DSL head with
--- slike/aconite for impatience setup. Uses empower runes (Runelore).
--- Bound to the `xxx` alias in the original profile.
-function runewarden.dwc.headprep()
-    if preGate(runewarden.dwc.headprep) then
-        return
-    end
-
-    local p = calcPrepped()
-    local incImp = runewarden.dwc.state.incImpatience
-    local venoms = {}
-
-    -- Setup inserts
-    if has("impatience") and has("anorexia") and not has("slickness") and
-        not has("paralysis") then
-        table.insert(venoms, "curare")
-        table.insert(venoms, "gecko")
-    end
-    if has("impatience") and not has("anorexia") and has("slickness") and
-        not has("paralysis") then
-        table.insert(venoms, "curare")
-        table.insert(venoms, "slike")
-    end
-    if has("impatience") and not has("anorexia") and not has("slickness") then
-        table.insert(venoms, "gecko")
-        table.insert(venoms, "slike")
-    end
-    if has("slickness") and not has("anorexia") and not has("stupidity") and
-        has("asthma") then
-        table.insert(venoms, "aconite")
-        table.insert(venoms, "slike")
-    end
-    if has("impatience") and not has("anorexia") and not has("slickness") and
-        has("asthma") then
-        table.insert(venoms, "slike")
-        table.insert(venoms, "gecko")
-    end
-    if has("impatience") and not has("anorexia") and not targetBalDown("salve") then
-        table.insert(venoms, "slike")
-    end
-
-    if incImp and not has("paralysis") then
-        table.insert(venoms, "curare")
-    end
-    if incImp and not has("asthma") then
-        table.insert(venoms, "kalmia")
-    end
-
-    if has("anorexia") and not has("dizziness") then
-        table.insert(venoms, "larkspur")
-    end
-    if has("anorexia") and not has("stupidity") then
-        table.insert(venoms, "aconite")
-    end
-    if has("anorexia") and not has("shyness") then
-        table.insert(venoms, "digitalis")
-    end
-    if has("anorexia") and not has("recklessness") then
-        table.insert(venoms, "eurypteria")
-    end
-
-    -- Standard cascade
-    if not has("paralysis") then
-        table.insert(venoms, "curare")
-    end
-    if not has("nausea") then
-        table.insert(venoms, "vernalius")
-    end
-    if not has("asthma") then
-        table.insert(venoms, "kalmia")
-    end
-    if not has("clumsiness") then
-        table.insert(venoms, "xentio")
-    end
-    if not has("slickness") and has("asthma") and venoms[1] == "curare" then
-        table.insert(venoms, "gecko")
-    end
-    if not has("sensitivity") and has("deaf") then
-        table.insert(venoms, "prefarar")
-        table.insert(venoms, "prefarar")
-    end
-    if not has("sensitivity") and not has("deaf") then
-        table.insert(venoms, "prefarar")
-    end
-    if not has("addiction") then
-        table.insert(venoms, "vardrax")
-    end
-    if not has("recklessness") then
-        table.insert(venoms, "eurypteria")
-    end
-    if not has("stupidity") then
-        table.insert(venoms, "aconite")
-    end
-    if not has("dizziness") then
-        table.insert(venoms, "larkspur")
-    end
-    if not has("shyness") then
-        table.insert(venoms, "digitalis")
-    end
-    if not has("brokenrightarm") then
-        table.insert(venoms, "epteth")
-    end
-    if not has("brokenleftarm") then
-        table.insert(venoms, "epteth")
-    end
-    if not has("darkshade") then
-        table.insert(venoms, "darkshade")
-    end
-
-    -- Auto-pick limb (head → right leg → ...)
-    local targetlimb
-    if not p.head then
-        targetlimb = "head"
-    elseif not p.rightleg then
-        targetlimb = "right leg"
-    elseif has("damagedrightleg") and not has("damagedhead") and p.head then
-        targetlimb = "head"
-    elseif p.rightleg and not p.leftleg then
-        targetlimb = "left leg"
-    else
-        targetlimb = getTargetLimb("head")
-    end
-
-    -- Attack selection
-    local useBisect = targetHpPct() <= runewarden.dwc.CONFIG.bisectHpThresh
-    local disembowel = has("impaled")
-    local needRaze = has("rebounding") or has("shield")
-    local needRaze2 = needRazeForLimb(targetlimb, p) and
-                          (targetlimb == "right leg" or targetlimb == "right arm")
-    local needRaze3 = needRazeForLimb(targetlimb, p) and
-                          (targetlimb == "left leg" or targetlimb == "left arm")
-
-    local atk
-    if useBisect and not has("shield") then
-        atk = cmdBisect()
-    elseif disembowel then
-        atk = ";disembowel " .. target
-    elseif needRaze or needRaze2 or needRaze3 then
-        atk = cmdRazeslash(targetlimb, venoms[1])
-    elseif has("prone") and has("damagedleftleg") then
-        atk = wieldPrefix() .. cmdAssess() .. "/fury on/impale " .. target
-    elseif not has("damagedrightleg") and has("nausea") and not has("rebounding") and
-        not has("shield") and p.rightleg then
-        atk = cmdDsl("right leg", "delphinium", "delphinium")
-    elseif has("damagedrightleg") and not has("rebounding") and not has("shield") and
-        p.head then
-        atk = cmdDsl("head", "slike", "aconite")
-    elseif has("nausea") and not has("rebounding") and not has("shield") and
-        has("damagedhead") then
-        atk = cmdDsl("head", venoms[2] or "kalmia", venoms[1] or "curare")
-    elseif has("damagedrightleg") and not has("rebounding") and not has("shield") and
-        p.leftleg and has("damagedtorso") and not has("slickness") then
-        atk = cmdDsl("left leg", "gecko", "curare")
-    elseif has("damagedrightleg") and not has("rebounding") and not has("shield") and
-        p.leftleg and has("damagedtorso") and has("slickness") then
-        atk = cmdDsl("left leg", "epteth", "curare")
-    elseif has("nausea") and (not p.leftleg or not p.rightleg) then
-        atk = cmdDsl(targetlimb, venoms[2] or "kalmia", venoms[1] or "curare")
-    elseif has("nausea") and not has("damagedtorso") then
-        atk = cmdDsl("torso", venoms[2] or "kalmia", venoms[1] or "curare")
-    else
-        atk = cmdDsl(nil, venoms[2] or "kalmia", venoms[1] or "curare")
-    end
-
-    -- 004's send wires empower runes + contemplate
-    local queueType = "FREE"
-    local engaged = runewarden.dwc.state.engaged
-    local needFalcon = runewarden.dwc.state.needFalcon
-    local empower = "empower priority set " ..
-                        runewarden.dwc.CONFIG.empowerRunes
-    local contemplate = "contemplate " .. target
-
-    if useBisect then
-        sendAttack("wield " .. runewarden.dwc.CONFIG.bisectWeaponId ..
-                       "/grip/" .. cmdAssess() .. "/bisect " .. target ..
-                       " curare/engage " .. target, queueType)
-        return
-    end
-    if not engaged and needFalcon then
-        sendAttack(empower .. "/falcon slay " .. target .. "/" .. atk ..
-                       "/engage " .. target .. "/" .. cmdAssess() .. "/" ..
-                       contemplate, queueType)
-    elseif not engaged then
-        sendAttack(empower .. "/" .. atk .. "/engage " .. target .. "/" ..
-                       cmdAssess() .. "/" .. contemplate, queueType)
-    else
-        sendAttack(empower .. "/" .. atk .. "/" .. cmdAssess() .. "/" ..
-                       contemplate, queueType)
-    end
-end
-
--- ============================================================
---  ============== MODE 5: KELPSTACK (was 005+006) ===============
--- ============================================================
--- Kelp-stack single-venom selection. The original had three functions
--- (runiedwckelpstack2 -> envenom2dwc -> dwcattack); collapsed here into
--- one. envenom1 uses a cascading-IF priority (LAST match wins); envenom2
--- uses an elseif chain (FIRST match wins). Both behaviors preserved.
---
--- The attack uses `rsl` (raze-slash with one venom) when target is
--- rebounding/shielded, otherwise `dsl <v1> <v2>` with no limb arg.
--- Wield is split L/R (was `wield left X/wield right Y/grip`).
-function runewarden.dwc.kelpstack()
-    if preGate(runewarden.dwc.kelpstack) then
-        return
-    end
-
-    local locks = checkLocks()
-    local softlock = locks.soft
-    -- envenom1 — cascading priority (LAST wins, matches original)
-    local envenom1
-    if softlock and not has("recklessness") then
-        envenom1 = "eurypteria"
-    end
-    if softlock and not has("stupidity") then
-        envenom1 = "aconite"
-    end
-    if softlock and not has("brokenleftarm") then
-        envenom1 = "epteth"
-    end
-    if softlock and not has("brokenrightarm") then
-        envenom1 = "epteth"
-    end
-
-    local envenom2 -- envenom2 may be set early if envenom1 takes the prone branch
-    if has("prone") then
-        envenom1 = "epseth"
-        envenom2 = "epseth"
-    end
-    if has("prone") and not has("anorexia") and not targetBalDown("salve") then
-        envenom1 = "slike"
-    end
-    if has("slickness") and not has("anorexia") and has("asthma") then
-        envenom1 = "slike"
-    end
-    if has("asthma") and not has("slickness") then
-        envenom1 = "gecko"
-    end
-    if not has("addiction") and has("weariness") then
-        envenom1 = "vardrax"
-    end
-    if not has("weariness") then
-        envenom1 = "vernalius"
-    end
-    if not has("asthma") then
-        envenom1 = "kalmia"
-    end
-    if not has("clumsiness") then
-        envenom1 = "xentio"
-    end
-
-    -- envenom2 — elseif chain (FIRST match wins), unless prone above already set it
-    if not envenom2 then
-        if not has("paralysis") then
-            envenom2 = "curare"
-        elseif has("asthma") and not has("slickness") and not has("paralysis") then
-            envenom2 = "curare"
-        elseif softlock and not has("recklessness") and envenom1 ~= "eurypteria" then
-            envenom2 = "eurypteria"
-        elseif softlock and not has("stupidity") and envenom1 ~= "aconite" then
-            envenom2 = "aconite"
-        elseif softlock and not has("brokenleftarm") and not has("brokenrightarm") and
-            envenom1 == "epteth" then
-            envenom2 = "epteth"
-        elseif has("prone") and envenom1 == "epseth" then
-            envenom2 = "epseth"
-        elseif has("prone") and not has("anorexia") and not targetBalDown("salve") and
-            envenom1 ~= "slike" then
-            envenom2 = "slike"
-        elseif not has("paralysis") and envenom1 ~= "curare" then
-            envenom2 = "curare"
-        elseif has("slickness") and not has("anorexia") and has("asthma") and
-            envenom1 ~= "slike" then
-            envenom2 = "slike"
-        elseif has("asthma") and not has("slickness") and envenom1 ~= "slike" then
-            envenom2 = "slike"
-        elseif not has("addiction") and has("weariness") and envenom1 ~= "vardrax" then
-            envenom2 = "vardrax"
-        elseif not has("paralysis") and envenom1 ~= "curare" then
-            envenom2 = "curare"
-        elseif not has("weariness") and envenom1 ~= "vernalius" then
-            envenom2 = "vernalius"
-        elseif not has("asthma") and envenom1 ~= "kalmia" then
-            envenom2 = "kalmia"
-        elseif not has("clumsiness") and envenom1 ~= "xentio" then
-            envenom2 = "xentio"
-        end
-    end
-
-    -- Fallbacks (original may leave envenom1/2 nil under extreme states)
-    envenom1 = envenom1 or "kalmia"
-    envenom2 = envenom2 or "curare"
-
-    -- Attack selection (was dwcattack)
-    local useBisect = targetHpPct() <= runewarden.dwc.CONFIG.bisectHpThresh
-    local engaged = runewarden.dwc.state.engaged
-
-    if has("rebounding") or has("shield") then
-        local atk = wieldLRPrefix() .. "falcon slay " .. target .. "/" ..
-                        cmdAssess() .. "/rsl " .. target .. " " .. envenom2
-        if not engaged then
-            sendAttack(atk .. "/engage " .. target, "FREE")
-        else
-            sendAttack(atk, "FREE")
-        end
-    elseif useBisect then
-        sendAttack("wield " .. runewarden.dwc.CONFIG.bisectWeaponId ..
-                       "/grip/" .. cmdAssess() .. "/bisect " .. target ..
-                       " curare/engage " .. target, "FREE")
-    else
-        local atk = wieldLRPrefix() .. "falcon slay " .. target .. "/" ..
-                        cmdAssess() .. "/dsl " .. target .. " " .. envenom1 ..
-                        " " .. envenom2
-        if not engaged then
-            sendAttack(atk .. "/engage " .. target, "FREE")
-        else
-            sendAttack(atk, "FREE")
-        end
-    end
-end
-
--- ============================================================
---  ============== MODE 6: LOCKPREP (was 007_LeviDWCDisembowel) ==
--- ============================================================
--- Lock-aware disembowel prep with empower runes. Uses two-pass venom
--- selection (each pass aware of lock state), per-limb raze under
--- rebounding/shield, and double-break detection. Queue type is FREESTAND.
---
--- The original referenced getLockingAffliction(target) for class-specific
--- truelock venoms — that required NDB. Here the truelock branch falls
--- through to the standard softlock/hardlock curare path (still kills the
--- target, just without the per-class optimization).
-function runewarden.dwc.lockprep()
-    if preGate(runewarden.dwc.lockprep) then
-        return
-    end
-
-    local p = calcPrepped()
-    local locks = checkLocks()
-
-    -- Venoms[1] — first pass priority
-    local venoms = {}
-    if locks.true_ then
-        -- DROPPED: per-class locking-aff branch (no NDB). Falls through.
-    elseif locks.hard and not has("paralysis") then
-        table.insert(venoms, "curare")
-    elseif locks.soft and not has("paralysis") then
-        table.insert(venoms, "curare")
-    elseif has("asthma") and has("impatience") and not has("anorexia") and
-        has("slickness") then
-        table.insert(venoms, "slike")
-    elseif has("asthma") and has("impatience") and has("anorexia") and
-        not has("slickness") then
-        table.insert(venoms, "gecko")
-    elseif has("asthma") and has("impatience") and not has("anorexia") and
-        not has("slickness") then
-        table.insert(venoms, "slike")
-    elseif not has("paralysis") then
-        table.insert(venoms, "curare")
-    elseif has("paralysis") then
-        if has("slickness") and has("asthma") and has("impatience") and
-            not has("anorexia") then
-            table.insert(venoms, "slike")
-        elseif not has("slickness") and has("asthma") and has("impatience") then
-            table.insert(venoms, "gecko")
-        elseif not has("slickness") and has("asthma") then
-            table.insert(venoms, "gecko")
-        elseif not has("nausea") then
-            table.insert(venoms, "vernalius")
-        elseif not has("clumsiness") then
-            table.insert(venoms, "xentio")
-        elseif not has("asthma") then
-            table.insert(venoms, "kalmia")
-        elseif not has("weariness") then
-            table.insert(venoms, "vernalius")
-        end
-    end
-
-    -- Venoms[2] — second pass priority
-    if locks.true_ then
-        -- DROPPED: per-class locking-aff branch
-    elseif locks.hard and not has("paralysis") and venoms[1] ~= "curare" then
-        table.insert(venoms, "curare")
-    elseif locks.soft and not has("paralysis") and venoms[1] ~= "curare" then
-        table.insert(venoms, "curare")
-    elseif has("asthma") and has("impatience") and not has("anorexia") and
-        not has("slickness") and venoms[1] == "slike" then
-        table.insert(venoms, "gecko")
-    elseif has("asthma") and has("impatience") and not has("anorexia") and
-        not has("slickness") and venoms[1] == "gecko" then
-        table.insert(venoms, "slike")
-    elseif not has("paralysis") and venoms[1] ~= "curare" then
-        table.insert(venoms, "curare")
-    elseif not has("nausea") and venoms[1] ~= "vernalius" then
-        table.insert(venoms, "vernalius")
-    elseif has("slickness") and has("asthma") and has("impatience") and
-        not has("anorexia") and venoms[1] ~= "slike" then
-        table.insert(venoms, "slike")
-    elseif not has("slickness") and has("asthma") and has("impatience") and
-        venoms[1] ~= "gecko" then
-        table.insert(venoms, "gecko")
-    elseif not has("slickness") and has("asthma") and venoms[1] ~= "gecko" then
-        table.insert(venoms, "gecko")
-    elseif has("clumsiness") and not has("asthma") and venoms[1] ~= "kalmia" then
-        table.insert(venoms, "kalmia")
-    elseif not has("clumsiness") and venoms[1] ~= "xentio" then
-        table.insert(venoms, "xentio")
-    elseif not has("weariness") and venoms[1] ~= "vernalius" then
-        table.insert(venoms, "vernalius")
-    elseif not has("addiction") and venoms[1] ~= "vardrax" then
-        table.insert(venoms, "vardrax")
-    elseif not has("darkshade") and venoms[1] ~= "darkshade" then
-        table.insert(venoms, "darkshade")
-    elseif not has("stupidity") and venoms[1] ~= "aconite" then
-        table.insert(venoms, "aconite")
-    else
-        table.insert(venoms, "prefarar")
-    end
-
-    venoms[1] = venoms[1] or "curare"
-    venoms[2] = venoms[2] or "prefarar"
-
-    -- Auto-pick limb (torso → right leg → left leg)
-    local targetlimb
-    if not p.torso then
-        targetlimb = "torso"
-    elseif not p.rightleg then
-        targetlimb = "right leg"
-    elseif not p.leftleg then
-        targetlimb = "left leg"
-    else
-        targetlimb = getTargetLimb("torso")
-    end
-
-    -- Attack selection
-    local useBisect = targetHpPct() <= runewarden.dwc.CONFIG.bisectHpThresh
-    local disembowel = has("impaled")
-    local empower = "empower priority set " ..
-                        runewarden.dwc.CONFIG.empowerRunes
-    local contemplate = "/" .. cmdAssess() .. "/contemplate " .. target
-
-    local atk
-    if useBisect and not has("shield") then
-        atk = "wield " .. runewarden.dwc.CONFIG.bisectWeaponId .. "/" ..
-                  cmdAssess() .. "/bisect " .. target .. " curare"
-    elseif disembowel then
-        atk = ";disembowel " .. target
-    elseif has("rebounding") and not has("shield") then
-        local limbForRaze
-        if has("nausea") then
-            if p.torso then
-                limbForRaze = "torso"
-            elseif p.leftleg then
-                limbForRaze = "left leg"
-            elseif p.rightleg then
-                limbForRaze = "right leg"
-            end
-        end
-        if limbForRaze then
-            atk = wieldPrefix() .. empower .. "/razeslash " .. target .. " " ..
-                      limbForRaze .. " " .. venoms[1] .. contemplate
-        else
-            atk = wieldPrefix() .. empower .. "/razeslash " .. target .. " " ..
-                      venoms[1] .. contemplate
-        end
-    elseif not has("rebounding") and has("shield") then
-        local limbForRaze
-        if has("nausea") then
-            if p.torso then
-                limbForRaze = "torso"
-            elseif p.leftleg then
-                limbForRaze = "left leg"
-            elseif p.rightleg then
-                limbForRaze = "right leg"
-            end
-        end
-        if limbForRaze then
-            atk = wieldPrefix() .. empower .. "/razeslash " .. target .. " " ..
-                      limbForRaze .. " " .. venoms[1] .. contemplate
-        else
-            atk = wieldPrefix() .. empower .. "/razeslash " .. target .. " " ..
-                      venoms[1] .. contemplate
-        end
-    elseif has("shield") and has("rebounding") then
-        atk = wieldPrefix() .. empower .. "/raze " .. target .. contemplate
-    elseif has("prone") and has("damagedleftleg") and has("damagedrightleg") then
-        atk = wieldPrefix() .. cmdAssess() .. "/fury on/impale " .. target
-    elseif (has("damagedrightleg") and p.leftleg and has("mildtrauma")) or
-        (getLimbDamage("torso") >= 100 and has("prone")) then
-        atk = wieldPrefix() .. cmdAssess() .. "/dsl " .. target ..
-                  " left leg " .. venoms[2] .. " " .. venoms[1] .. contemplate
-    elseif has("nausea") then
-        if (p.rightleg and p.leftleg and has("mildtrauma")) or
-            (getLimbDamage("torso") >= 100 and not has("prone")) then
-            atk = wieldPrefix() .. cmdAssess() .. "/dsl " .. target ..
-                      " right leg delphinium delphinium" .. contemplate
-        elseif p.rightleg and p.leftleg and p.torso and not has("mildtrauma") then
-            atk = wieldPrefix() .. cmdAssess() .. "/dsl " .. target ..
-                      " torso " .. venoms[2] .. " " .. venoms[1] .. contemplate
-        elseif p.rightleg and p.torso and not p.leftleg and not p.razeLeftleg then
-            atk = wieldPrefix() .. cmdAssess() .. "/dsl " .. target ..
-                      " left leg " .. venoms[2] .. " " .. venoms[1] ..
-                      contemplate
-        elseif p.leftleg and p.torso and not p.rightleg and not p.razeRightleg then
-            atk = wieldPrefix() .. cmdAssess() .. "/dsl " .. target ..
-                      " right leg " .. venoms[2] .. " " .. venoms[1] ..
-                      contemplate
-        elseif not p.torso then
-            atk = wieldPrefix() .. cmdAssess() .. "/dsl " .. target ..
-                      " torso " .. venoms[2] .. " " .. venoms[1] .. contemplate
-        elseif not p.rightleg then
-            atk = wieldPrefix() .. cmdAssess() .. "/dsl " .. target ..
-                      " right leg " .. venoms[2] .. " " .. venoms[1] ..
-                      contemplate
-        elseif not p.leftleg then
-            atk = wieldPrefix() .. cmdAssess() .. "/dsl " .. target ..
-                      " left leg " .. venoms[2] .. " " .. venoms[1] ..
-                      contemplate
-        else
-            -- All prepped, no specific case — fall through to default
-            atk = wieldPrefix() .. cmdAssess() .. "/dsl " .. target .. " " ..
-                      venoms[2] .. " " .. venoms[1] .. contemplate
-        end
-    else
-        atk = wieldPrefix() .. cmdAssess() .. "/dsl " .. target .. " " ..
-                  venoms[2] .. " " .. venoms[1] .. contemplate
-    end
-
-    -- 007's send uses FREESTAND queue with optional falcon append
-    local queueType = "FREESTAND"
-    local engaged = runewarden.dwc.state.engaged
-    local falconAttack = runewarden.dwc.state.falconAttack
-
-    if falconAttack then
-        if not engaged then
-            sendAttack(atk .. "/engage " .. target, queueType)
-        else
-            sendAttack(atk, queueType)
-        end
-    else
-        if not engaged then
-            sendAttack(atk .. "/falcon slay " .. target .. "/engage " ..
-                           target, queueType)
-        else
-            sendAttack(atk .. "/falcon slay " .. target, queueType)
-        end
-    end
-end
-
--- ============================================================
---  MODE ROUTER
--- ============================================================
-local MODE_FNS = {
-    riftlock = runewarden.dwc.riftlock,
-    basic = runewarden.dwc.basic,
-    disembowel = runewarden.dwc.disembowel,
-    headprep = runewarden.dwc.headprep,
-    kelpstack = runewarden.dwc.kelpstack,
-    lockprep = runewarden.dwc.lockprep
+-- =============================================================
+-- Batch builder + fire
+-- =============================================================
+local PLAN = {
+  disembowel = plan_disembowel,
+  head = plan_head,
+  basic = plan_basic,
+  rift = plan_rift,
 }
 
-function runewarden.dwc.setMode(mode)
-    if MODE_FNS[mode] then
-        runewarden.dwc.mode = mode
-        cecho("\n<cyan>[DWC] Mode set to: <yellow>" .. mode)
-    else
-        cecho("\n<red>[DWC] Invalid mode: <yellow>" .. tostring(mode))
-        cecho(
-            "\n<red>[DWC] Valid: riftlock, basic, disembowel, headprep, kelpstack, lockprep")
+local function build_batch(s)
+  local fn = PLAN[M.state.plan] or plan_disembowel
+  local cmds = {}
+  extend(cmds, M.config.precommands or {})
+  extend(cmds, fn(s, derive(s)))
+  -- DISCERN ridealong keeps ak.bleeding fresh for the GUI (display only).
+  if M.config.discern_ridealong then
+    cmds[#cmds + 1] = "DISCERN " .. s.target
+  end
+  return cmds
+end
+
+local function compute_and_fire()
+  local s = read_state()
+  if not is_valid_target(s.target) then
+    return
+  end
+  local cmds = build_batch(s)
+  if #cmds == 0 then
+    return
+  end
+  boxEcho.send("FIRE")
+  send("SETALIAS DWCATK " .. table.concat(cmds, "/"))
+  send("QUEUE ADDCLEARFULL FREE DWCATK")
+  M.state.last_fire_time = os.time()
+end
+
+-- =============================================================
+-- Public surface (called from hand-wired Mudlet aliases / triggers)
+-- =============================================================
+-- Alias 'zz' (suggested): arm for the next balance window, or fire now if EQBAL ready.
+function M.arm()
+  if not is_valid_target(target) then
+    boxEcho.send("[DWC] Not arming: target is '" .. tostring(target) .. "'.")
+    return
+  end
+  if on_eqbal() then
+    compute_and_fire()
+  else
+    boxEcho.send("ARMED")
+    M.state.armed = true
+  end
+end
+
+-- Alias 'dwcplan <name>': choose the active offense plan.
+function M.set_plan(name)
+  if not PLAN[name] then
+    echo("[DWC] Unknown plan '" .. tostring(name) .. "'. Use: disembowel | head | basic | rift\n")
+    return
+  end
+  M.state.plan = name
+  echo("[DWC] Plan: " .. name .. "\n")
+end
+
+-- Toggle falcon usage (Levi need_falcon).
+function M.toggle_falcon()
+  M.state.need_falcon = not M.state.need_falcon
+  echo("[DWC] Falcon: " .. (M.state.need_falcon and "on" or "off") .. "\n")
+end
+
+-- Toggle the salve-down flag (rift riftlock branch; AK can't see salve balance).
+function M.set_salve_down(v)
+  M.state.salve_down = v and true or false
+  echo("[DWC] salve_down = " .. tostring(M.state.salve_down) .. "\n")
+end
+
+-- Balance-used trigger handler -- pass the captured recovery interval (seconds).
+-- Schedules a one-shot dispatch for (interval - prearm) so the batch lands the
+-- instant balance returns (the server-side QUEUE holds it). Fires only if armed.
+local BALANCE_USED_COMBAT_WINDOW = 10
+function M.on_balance_used(seconds)
+  if os.time() - (M.state.last_fire_time or 0) > BALANCE_USED_COMBAT_WINDOW and not M.state.armed then
+    return
+  end
+  if not is_valid_target(target) then
+    return
+  end
+  local interval = tonumber(seconds)
+  if not interval or interval <= 0 then
+    return
+  end
+  local prearm = M.config.prearm_interval or getNetworkLatency()
+  local fire_delay = math.max(0, interval - prearm)
+  tempTimer(
+    fire_delay,
+    function()
+      if M.state.armed then
+        M.state.armed = false
+        compute_and_fire()
+      end
     end
+  )
 end
 
-function runewarden.dwc.dispatch()
-    local fn = MODE_FNS[runewarden.dwc.mode]
-    if not fn then
-        cecho("\n<red>[DWC] No handler for mode: " ..
-                  tostring(runewarden.dwc.mode))
-        return
-    end
-    fn()
+-- Alias 'dwcreset': teardown. Drop fury and disarm.
+function M.reset()
+  send("FURY OFF")
+  M.state.armed = false
+  M.state.last_fire_time = 0
+  boxEcho.send("[DWC] System reset.")
 end
 
-function runewarden.dwc.status()
-    local s = runewarden.dwc.state
-    cecho("\n<cyan>[DWC] Status")
-    cecho("\n<cyan>| <white>Mode: <yellow>" .. tostring(runewarden.dwc.mode))
-    cecho("\n<cyan>| <white>Target: <yellow>" .. tostring(target))
-    cecho("\n<cyan>| <white>Target limb: <yellow>" ..
-              tostring(s.targetLimb or rawget(_G, "targetlimb") or "(auto per-mode)"))
-    cecho("\n<cyan>| <white>Engaged: <yellow>" .. tostring(s.engaged))
-    cecho("\n<cyan>| <white>Need falcon: <yellow>" .. tostring(s.needFalcon))
-    cecho("\n<cyan>| <white>Falcon attack: <yellow>" ..
-              tostring(s.falconAttack))
-    cecho("\n<cyan>| <white>Inc impatience: <yellow>" ..
-              tostring(s.incImpatience))
-    cecho("\n<cyan>| <white>Target HP%: <yellow>" .. targetHpPct())
+-- gmcp.Char.Vitals handler -- firing is driven by the prearm dispatch timer, so
+-- this is a no-op kept for parity with the sibling ports' wiring.
+function M.on_gmcp_char_vitals(_event)
 end
 
-function runewarden.dwc.reset()
-    runewarden.dwc.state = {
-        engaged = false,
-        needFalcon = false,
-        falconAttack = false,
-        incImpatience = false,
-        targetLimb = nil
-    }
-    cecho("\n<cyan>[DWC] State reset")
-end
-
--- ============================================================
---  TOP-LEVEL ALIAS WRAPPERS  (keep input-line typeable)
--- ============================================================
-function rrift()
-    runewarden.dwc.riftlock()
-end
-function rbasic()
-    runewarden.dwc.basic()
-end
-function rdism()
-    runewarden.dwc.disembowel()
-end
-function rhead()
-    runewarden.dwc.headprep()
-end
-function rkelp()
-    runewarden.dwc.kelpstack()
-end
-function rlock()
-    runewarden.dwc.lockprep()
-end
-function rdwc()
-    runewarden.dwc.dispatch()
-end
-function rdwcstatus()
-    runewarden.dwc.status()
-end
-function rdwcreset()
-    runewarden.dwc.reset()
-end
-function rdwcmode(m)
-    runewarden.dwc.setMode(m)
-end
-function rdwclimb(l)
-    runewarden.dwc.setLimb(l)
-end
+boxEcho.send("[DWC] Combat engine loaded.")

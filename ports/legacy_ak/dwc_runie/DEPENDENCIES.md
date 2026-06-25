@@ -1,317 +1,182 @@
-# DWC Runie Consolidation — Legacy / AK Port
+# DWC Runewarden — Legacy / AK Port
 
-Mapping doc for porting the seven Runewarden DWC scripts to **Legacy** (self
-combat framework) + **AK** (enemy limb & affliction tracker).
+Port of the Levi/Ataxia **Dual-Cutting (DWC) Runewarden** offense to **Legacy**
+(self-curing framework) + **AK** (enemy aff/limb tracker), in the sibling-port
+house style (`2h_runie`, `snb_runie`, `blademaster`).
 
-**Source files (consolidating):**
-- `src_new/scripts/.../dwc_runie/001_RIFT.lua` — riftlock (anti-Restore epteth/epteth)
-- `src_new/scripts/.../dwc_runie/002_BASIC_2.lua` — neutral DWC pressure (delegates to disembowel)
-- `src_new/scripts/.../dwc_runie/003_Disembowel_Prep.lua` — torso-focused prep + impale
-- `src_new/scripts/.../dwc_runie/004_Head_Prep.lua` — head-focused mental stack (`xxx` alias)
-- `src_new/scripts/.../dwc_runie/005_DWCLogic.lua` — kelp-stack envenom1 / envenom2 chain
-- `src_new/scripts/.../dwc_runie/006_Attack_DWC.lua` — kelp-stack attack execution
-- `src_new/scripts/.../dwc_runie/007_LeviDWCDisembowel.lua` — lock-aware head prep with empower runes
+**Source of truth (combat logic):** the Levi ataxia DWC scripts —
+- `dwc_runie/003_Disembowel_Prep.lua` — `dwcprioslimb` → plan **`disembowel`** (default)
+- `dwc_runie/004_Head_Prep.lua` — `dwcpriosheadprep` → plan **`head`**
+- `dwc_runie/002_BASIC_2.lua` — `dwcpriosbasic` → plan **`basic`**
+- `dwc_runie/001_RIFT.lua` — `runie_riftlock` → plan **`rift`**
 
-**Destination:** `ports/legacy_ak/dwc_runie/dwc_runie.lua` (~970 lines, syntax-clean).
-
-**Strategy:** Inline replace — no shim layer. Final file contains zero
-`ataxia.*` / `ataxiaTemp.*` / `ataxiaTables.*` / `ataxiaNDB_*` references.
-`tAffs` / `tBals` / `combatQueue` references are all routed through helpers.
-`lb[target].hits[limb]` is preserved (both Levi and AK use it).
+The decision ladders (branch order, attack commands, venom selection) are
+reproduced **verbatim**; only the *state model* and *firing spine* were
+re-pointed at the AK/Legacy host APIs and the sibling-port arm/JIT/dispatch.
+Game-command letter-case was normalised to UPPERCASE to match the sibling ports
+(Achaea is case-insensitive; semantics are unchanged).
 
 ---
 
-## Status
+## Architecture
 
-✅ **Tier 1 (AK)** — DONE.
-- `tAffs.X` → `has("X")` (reads `affstrack.score[X] >= AFF_THRESHOLD=30`).
-- `tBals.X` → `targetBalDown("X")` (reads `ak.bals[X] == false`; default false
-  if `ak.bals` is absent, which preserves attack flow and never auto-fires
-  the riftlock kill route until the user wires balance tracking).
-- `lb[target].hits[limb]` — unchanged.
-- `ataxiaTemp.lastAssess` → `targetHpPct()` (`ak.currenthealth/maxhealth * 100`).
-- `ataxiaNDB_getClass(target)` → DROPPED (only guarded the dead `add_dedication`
-  branch in 001-004 and the per-class truelock-venom branch in 007).
-- Class-specific truelock branch in 007 collapsed: falls through to standard
-  softlock/hardlock curare logic. The target still dies, just without the
-  per-class venom optimization.
-
-✅ **Tier 2 (Legacy)** — DONE.
-- `vital("hp")` / `vital("mp")` etc. (with `tonumber`) for **hp / maxhp / mp / maxmp**.
-- **Separator** → `"/"` everywhere, hardcoded (Legacy ATK alias convention).
-- **Send pattern** → `sendAttack(cmd, "FREE"|"FREESTAND")` helper that emits the
-  `SETALIAS ATK <cmd>` + `QUEUE ADDCLEARFULL <queue> ATK` pair.
-- **`combatQueue()`** — removed; Legacy handles pre-attack hooks externally.
-- Self afflictions → `selfAff("X")` (reads `Legacy.Curing.Affs[X]`).
-- Paused → `isPaused()` (`Legacy.Settings.Curing.status == false`).
-- **Weapons** → `CONFIG.weapon1Id` / `CONFIG.weapon2Id` (was `ataxia.getWeapon`).
-- **DWC slash damage** → `CONFIG.dwcSlashDamage` (was `ataxiaTables.limbData.dwcSlash`).
-- **Axe delta** → `CONFIG.axeDelta` (was hardcoded `-3` in source).
-- **Bisect weapon** → `CONFIG.bisectWeaponId` (was hardcoded `longsword`/`bastard`).
-- **Empower runes** → `CONFIG.empowerRunes` (was hardcoded `"kena mannaz sleizak"`).
-- **Lock break** → ported and collapsed to Runewarden-only: `selfNeedLockBreak()`
-  checks asthma+anorexia+slickness|bloodfire; `selfLockBreak()` sends
-  `touch tree` (after `stand` if prone). 2s cooldown. Knights use `tree`,
-  not `fitness` (which is Monk's lock-break).
-
-✅ **Tier 3 (rebound hold)** — STUB.
-- `reboundHold.gate(fn)` → `runewarden.dwc.reboundGate(fn)` (returns false by
-  default; user can override with their own gate implementation).
-
-🟢 **Port status: complete.** 0 `TODO(legacy)` markers remaining.
+- **No self-registration.** The module defines functions only; wire the
+  hand-made Mudlet aliases/triggers to them per `MUDLET_SETUP.md`. No
+  `tempAlias` / `tempRegexTrigger` / `registerAnonymousEventHandler`.
+- **JIT dispatch.** An alias **arms** (`M.arm()`, fires immediately if balance+eq
+  are up via `gmcp.Char.Vitals.bal/.eq == "1"`). A balance-**used** trigger calls
+  `M.on_balance_used(interval)`, which schedules a `tempTimer` for
+  `interval - getNetworkLatency()`; on expiry, if still armed, it dispatches with
+  **current** state and disarms (one shot per arm).
+- **User-selected plan.** Unlike `2h_runie` (auto weapon/phase cascade), the DWC
+  routines are four **mutually-exclusive** offense plans the user picks with
+  `M.set_plan("disembowel"|"head"|"basic"|"rift")`. Each is its own Levi function.
+- **Attack delivery:** `send("SETALIAS DWCATK <cmd1/cmd2/…>")` then
+  `send("QUEUE ADDCLEARFULL FREE DWCATK")` — the sibling-port queue convention
+  (`/`-separated sub-commands; Levi's `;`-joined string maps 1:1).
 
 ---
 
-## Final Public API
+## Symbol mapping (the anti-"dead global" contract)
 
-Only these are exposed on the namespace. Everything else is file-local.
+Every state READ maps to a **proven** AK/Legacy source. The first DWC/Magi ports
+were scrapped because ported logic read invented globals nothing populated — do
+not reintroduce `tAffs.bleed`, `tAffs.damaged*`, `envenom*`, etc.
 
-### `runewarden.dwc.*` — data
-| Symbol | Purpose |
-| --- | --- |
-| `CONFIG` | All tunables (damage, weapon IDs, thresholds, runes) |
-| `state` | Runtime mutable state (engaged, falcon flags, targetLimb) |
-| `mode` | Current default mode for `dispatch()` |
+### Target state
+| Levi symbol | Used for | AK / Legacy equivalent |
+| --- | --- | --- |
+| `tAffs.<aff>` | venom ladders, branch gates | `aff_present(s,"<aff>")` = `affstrack.score[aff] >= config.aff_threshold` |
+| `tAffs.rebounding` / `.shield` | raze / bisect gates | `ak.defs.rebounding` / `ak.defs.shield` (and `not ignoreShield`) — **not** affstrack |
+| `tAffs.impaled` / `timpale` | disembowel gate | `affstrack.impale == "Me"` (`s.impaled`); Levi's `or timpale` fallback dropped (no AK source) |
+| `tAffs.damaged<limb>` / `broken<arm>` | "limb already broken" gates | `is_limb_broken(limb)` = `lb[target].hits[limb] >= 100` (lb-derived; the safe mapping) |
+| `tAffs.mildtrauma` | torso-broken (plan rift/007) | `is_limb_broken("torso")` |
+| `lb[target].hits[limb]` | limb damage %, prep math | **same** (spaced keys: `"left leg"`; raw `target` key) |
+| `scimdamage = ataxiaTables.limbData.dwcSlash * 2` | one-DSL break prediction | `config.dwc_slash_damage * 2` (a DSL lands two slashes) |
+| `axedamage = scimdamage - 3` | raze margin checks | same formula |
+| `php` / `ataxiaTemp.lastAssess` | BISECT gate (≤ 35%) | `hp_pct(s)` from `ak.currenthealth` (fallback `ak.health`) / `ak.maxhealth` |
+| `engaged` | ENGAGE suffix | `ak.engaged` |
+| `tAffs.bleed` | **display only** | `ak.bleeding` (`s.bleed`) — see note below |
+| `ataxia.getWeapon("weaponN")` | wield | `config.weaponN` |
 
-### `runewarden.dwc.*` — functions
+### Bleed — the central DWC mechanic, sourced correctly
+The DWC decision tree **never branches on bleeding** — it kills via
+limb-prep → IMPALE → DISEMBOWEL (and a low-HP BISECT). So `tAffs.bleed` is read
+into `s.bleed` from **`ak.bleeding`** (the same accessor the working Blademaster
+port uses) purely for awareness/GUI, and is kept fresh by the optional
+`DISCERN <target>` ridealong appended to each batch. The Levi DISCERN ladder
+(`discern_levels/001–011`) and haemophilia clamps are **not** ported — they
+duplicate what `ak.bleeding` already provides. Set `config.discern_ridealong =
+false` for a 1:1 match with the (non-discerning) Levi source.
+
+---
+
+## Deliberate deviations from the literal Levi source
+
+These are **intentional** — porting the bugs faithfully would break the port:
+
+1. **`002` `prepped_torso` is computed locally.** Levi's `dwcpriosbasic` reads a
+   `prepped_torso` global it never assigns (stale cross-routine state). We
+   recompute it each tick in `derive()`.
+2. **`002` nausea hand-off returns the disembowel plan directly.** Levi calls
+   `dwcprioslimb()` (which *sends*) and then falls through and *sends again* — a
+   double-send. We return the disembowel plan's batch instead.
+3. **`001` `targetlimb` is assigned.** Levi's `runie_riftlock` uses `targetlimb`
+   without ever setting it (stale global → nil concat). We use the disembowel
+   limb pick (torso → right leg → left leg).
+4. **Falcon is a `need_falcon` gate, not re-emitted spam.** `FALCON SLAY` is
+   emitted per the source's gating (basic: always; disembowel/head: when
+   `not engaged and need_falcon`; rift: never). It self-limits because the batch
+   appends `ENGAGE` and the next tick reads `ak.engaged`.
+5. **`tBals.salve` (untracked).** AK exposes no salve-balance flag. The rift
+   plan's riftlock branch (`dsl … EPTETH EPTETH`) and the salve-gated venom adds
+   read `M.state.salve_down` (default `false`) — a manual flag the user can set
+   (`dwcsalve on`). Faithful default: branch off.
+6. **`inc_imp` (untracked).** The head plan's incoming-impatience venom adds are
+   gated `false` (Levi self-tracks this via a trigger; no AK source).
+7. **Dead code dropped:** `add_dedication` (Levi's `(x ~= 'Apostate' or x) ~=
+   'Priest'` is a no-op bug), `impale_blackout`, `partyrelay`, `softlock`/
+   `treelock` locals, and the dead atk-string BISECT branches (overridden by the
+   dispatch-level BISECT in disembowel/head).
+8. **BISECT ignores shield (disembowel/head).** The live Levi dispatch fires
+   BISECT on `use_bisect` alone (`003:333`, `004:363`); the `and not shield` you
+   see on the *atk-string* bisect branch is dead code. So a shielded low-HP target
+   still bisects (BISECT bypasses defenses, per the SnB port).
+9. **`002` `need_raze2`/`need_raze3` collapsed into `need_raze`.** In `dwcpriosbasic`
+   those two branches emit an *untargeted* `razeslash <target> venoms[1]` (identical
+   to `need_raze`) and are gated on `targetlimb == "right leg"`/etc. — but `002`
+   never assigns `targetlimb` (stale global), so they are unreachable via defined
+   state. The port keeps only `need_raze`. (In disembowel/head/rift, which *do*
+   assign `targetlimb`, all three raze branches are reproduced — they emit a
+   *targeted* razeslash there.)
+
+---
+
+## Host-global contract
+
+Reads: `gmcp.Char.Vitals.bal/.eq` (strings `"1"`/`"0"`), `target`,
+`ak.currenthealth`/`ak.health`/`ak.maxhealth`, `ak.defs.rebounding`/`.shield`,
+`ak.engaged`, `ak.bleeding`, `affstrack.score[<aff>]` (0–100), `affstrack.impale`
+(`"Me"`), `lb[target].hits[<spaced limb>]` (0–200+), `ignoreShield`.
+
+Writes (host fns): `send`, `tempTimer`, `getNetworkLatency`, `boxEcho.send`,
+`echo`, `os.time`.
+
+---
+
+## Public API
+
 | Symbol | Called from |
 | --- | --- |
-| `setMode(m)` | Aliases (riftlock/basic/disembowel/headprep/kelpstack/lockprep) |
-| `setLimb(limb)` | Aliases (sets `state.targetLimb`) |
-| `dispatch()` | Aliases (delegates to current mode) |
-| `status()` | `rdwcstatus` alias |
-| `reset()` | `rdwcreset` alias |
-| `riftlock()` | `rrift` alias (direct call) |
-| `basic()` | `rbasic` alias (direct call) |
-| `disembowel()` | `rdism` alias (direct call); also called by `basic()` on nausea+unprepped |
-| `headprep()` | `rhead` alias — was wired to `xxx` in original profile |
-| `kelpstack()` | `rkelp` alias — was wired to `kel` in original profile |
-| `lockprep()` | `rlock` alias (direct call) |
-| `reboundGate(fn)` | Override-point for user's own rebound-hold logic |
-
-### Top-level aliases (kept for typeability from Mudlet input line)
-`rrift`, `rbasic`, `rdism`, `rhead`, `rkelp`, `rlock`, `rdwc`, `rdwcstatus`,
-`rdwcreset`, `rdwcmode <m>`, `rdwclimb <limb>` — each a one-line wrapper.
+| `M.arm()` | the arming alias (e.g. `zz`) — normal entry point |
+| `M.on_balance_used(interval)` | the REQUIRED "Balance used: Ns." trigger |
+| `M.set_plan(name)` | `dwcplan <disembowel\|head\|basic\|rift>` |
+| `M.toggle_falcon()` | `dwcfalcon` — flip `need_falcon` |
+| `M.set_salve_down(bool)` | `dwcsalve on\|off` — rift riftlock gate |
+| `M.reset()` | `dwcreset` — FURY OFF + disarm |
+| `M.on_gmcp_char_vitals(e)` | optional vitals handler (no-op; parity stub) |
+| `M.config` / `M.state` | tunables / runtime state |
 
 ---
 
-## `runewarden.dwc.CONFIG` — tunable knobs
+## Config to fill in before use
 
-```lua
-runewarden.dwc.CONFIG = {
-  affThreshold      = 30,            -- AK affstrack threshold (0-100)
-  dwcSlashDamage    = 16,            -- per-slash % HP (calibrate)
-  axeDelta          = 3,             -- axe deals dwc - axeDelta per swing
-  weapon1Id         = "scimitar1",   -- replace with your scimitar/axe ID
-  weapon2Id         = "scimitar2",   -- replace with your scimitar/axe ID
-  bisectWeaponId    = "bastard",     -- two-hander for bisect (was "bastard"/"longsword")
-  bisectHpThresh    = 35,            -- HP% to flip to bisect kill
-  empowerRunes      = "kena mannaz sleizak",
-  lockBreakCooldown = 2              -- seconds between `touch tree` attempts
-}
-```
-
-Set these in your profile **after** the module loads:
-```lua
-runewarden.dwc.CONFIG.weapon1Id      = "scimitar123456"   -- your real IDs
-runewarden.dwc.CONFIG.weapon2Id      = "scimitar789012"
-runewarden.dwc.CONFIG.bisectWeaponId = "bastard345678"
-runewarden.dwc.CONFIG.dwcSlashDamage = 16   -- calibrate against a live target
-```
+- `config.weapon1` / `config.weapon2` — your two cutting weapon **item ids**
+  (placeholders: `"scimitar"`).
+- `config.bisect_weapon` — swap-in execute weapon for the disembowel/head BISECT
+  (`wield <this>;grip`; placeholder `"bastard"`).
+- `config.basic_bisect_weapon` — the basic/rift SnB bisect weapon
+  (`wield shield <this>`; placeholder `"longsword"`).
+- `config.empower_runes` — head-prep `EMPOWER PRIORITY SET` (default
+  `"KENA MANNAZ SLEIZAK"`).
+- `config.dwc_slash_damage` — per-slash limb damage (default `6.6`; `scimdamage`
+  is `2×`). Tune to your actual DSL break math.
+- `config.aff_threshold` — affstrack "present" cutoff (default `50`).
 
 ---
 
-## Tier 1 — Target State (AK domain)
+## Open decisions / verify live
 
-| Levi symbol | Used for | Legacy/AK equivalent | Status |
-| --- | --- | --- | --- |
-| `target` (string) | Current target name | **same** (global `target`) | ✅ |
-| `tAffs.X` | All affliction checks | `has("X")` → `affstrack.score[X] >= 30` | ✅ |
-| `tBals.salve` | Salve-balance state for riftlock | `targetBalDown("salve")` → `ak.bals.salve == false` | ✅ |
-| `lb[target].hits[limb]` (0-200) | Limb damage % | **same** (`lb[target].hits[limb]`) | ✅ |
-| `ataxiaTemp.lastAssess` | Target HP% for bisect threshold | `targetHpPct()` → `ak.currenthealth/maxhealth * 100` | ✅ |
-| `ataxiaNDB_getClass(target)` | Per-class lockaff (007) + Apostate/Priest dedication skip (001-004) | **DROPPED** — dedication branch was dead code; 007 truelock branch falls through to standard curare | ✅ |
-| `timpale` (global) | Alternate impale flag in 003 | Read via `rawget(_G, "timpale")`; user wires from their own trigger | ✅ |
-
----
-
-## Tier 2 — Self State (Legacy domain)
-
-| Levi symbol | Used for | Legacy/AK equivalent | Status |
-| --- | --- | --- | --- |
-| `ataxia.afflictions.paralysis` | Self-paralysis gate for impale-prone branch (001/002) | `selfAff("paralysis")` | ✅ |
-| `ataxia.afflictions.prone` | Self-prone for stand-before-tree | `selfAff("prone")` | ✅ |
-| `ataxia.afflictions.stupidity` | Skip-tick gate (added during port — was missing from source) | `selfAff("stupidity")` | ✅ |
-| `gmcp.Char.Vitals.hp` / `.maxhp` / `.mp` / `.maxmp` | Self HP/MP ratio for dedication (dead code) + php in 003 | `vital("hp")` etc. | ✅ |
-| `ataxia.vitals.class` | `impale_blackout` flag (never read — dead code) | DROPPED | ✅ |
-| `ataxia.settings.paused` | Combat paused | `isPaused()` → `Legacy.Settings.Curing.status == false` | ✅ |
-| `ataxia.settings.separator` | Command separator | `"/"` hardcoded (Legacy ATK alias convention) | ✅ |
-| `ataxia.getWeapon(slot)` | Weapon IDs | `CONFIG.weapon1Id` / `CONFIG.weapon2Id` | ✅ |
-| `ataxiaTables.limbData.dwcSlash` | Per-slash damage % | `CONFIG.dwcSlashDamage` | ✅ |
-| `partyrelay` (global) | Used only by removed `combatQueue()` | DROPPED | ✅ |
-| `engaged` (global) | Engagement state for queue-tail engage append | `runewarden.dwc.state.engaged` | ✅ |
-| `need_falcon` (global) | Falcon-prepend flag (003/004) | `runewarden.dwc.state.needFalcon` | ✅ |
-| `falconattack` (global) | Falcon-suffix flag (007) | `runewarden.dwc.state.falconAttack` | ✅ |
-| `inc_imp` (global) | Incoming impatience flag (004) | `runewarden.dwc.state.incImpatience` | ✅ |
-| `targetlimb` (global) | Focus limb for raze/dsl branches | Manual override via `runewarden.dwc.state.targetLimb` / global; absent that, per-mode `autoPickLimb()` resolves it | ✅ |
+- **`ak.bleeding`** must be populated by your AK build for the bleed display
+  (Blademaster relies on it). The kill route does **not** need it.
+- **`affstrack.score` for rune-applied affs** (nausea/paralysis/anorexia/
+  slickness/asthma/impatience/addiction/etc.): the venom ladders and the
+  nausea-gated branches trust affstrack to see normal combat landings, exactly as
+  `snb_runie`/`2h_runie` do. Verify these keys populate on your build — this is
+  the one residual visibility bet.
+- **`damaged<limb>` mapping.** Derived from `is_limb_broken` (`lb >= 100`). If
+  your AK build exposes distinct `affstrack.score.damaged<limb>` keys you trust,
+  swap the `is_limb_broken` calls in `derive()` for `aff_present`.
+- **HP field.** `hp_pct` reads `ak.currenthealth` then falls back to `ak.health`
+  (snb's field) — works on either build.
 
 ---
 
-## Tier 3 — Helper Functions
+## Testing
 
-| Levi symbol | Purpose | Legacy/AK equivalent | Status |
-| --- | --- | --- | --- |
-| `checkAffList({...}, n)` | At-least-n afflictions present | `hasN({...}, n)` | ✅ |
-| `checkTargetLocks()` | Set softlock/hardlock/truelock globals | `checkLocks()` returns struct (no global mutation) | ✅ |
-| `getLockingAffliction(target)` | Class-specific lock-blocking aff | DROPPED (required NDB) | ✅ |
-| `combatQueue()` | Pre-attack chain (g body / g gold / stand / parry / chase) | REMOVED — Legacy handles externally | ✅ |
-| `reboundHold.gate(fn)` | Defer attack while we have rebounding | `runewarden.dwc.reboundGate(fn)` stub | ⚠ user-override |
-| `cecho(...)` / `send(...)` | Mudlet built-ins | Keep | ✅ |
-| `combatQueue` / `freestand` queue dispatch | Queue type | `sendAttack(cmd, "FREE"|"FREESTAND")` | ✅ |
-
----
-
-## Tier 4 — Commands (Achaea verbatim)
-
-These are unchanged from Levi — pure Achaea command syntax:
-
-| Command | Used by | Notes |
-| --- | --- | --- |
-| `wield <w1> <w2>` | All modes | Dual-wield primary stance |
-| `wield left <w1>/wield right <w2>/grip` | kelpstack | Separate L/R wield (006-style) |
-| `wipe <weapon>` | All modes | Required before envenom |
-| `assess <target>` | All modes | Feeds HP% — also drives AK's hp tracking |
-| `dsl <tar> [<limb>] <v1> <v2>` | All modes | Dual slash with optional limb |
-| `razeslash <tar> [<limb>] <v1>` | All modes | Combined raze + slash |
-| `rsl <tar> <v>` | kelpstack only | Single-venom raze-slash |
-| `raze <tar>` | lockprep | Plain raze (both rebounding + shield) |
-| `impale <target>` | 001/002/003/004/007 | Prone-leg kill prep |
-| `disembowel <target>` | All modes | Impaled-torso kill |
-| `bisect <target> curare` | All modes | Two-hander finisher (HP <= 35%) |
-| `fury on` | impale branches | Knight passive damage boost |
-| `falcon slay <target>` | basic/headprep/kelpstack/lockprep | Falcon attack |
-| `engage <target>` | All modes | Engagement append |
-| `empower priority set <runes>` | headprep/lockprep | Runelore rune priority |
-| `contemplate <target>` | headprep/lockprep | Discipline rune — reveals bleeding |
-| `touch tree` | self lock-break | Knight cure-random-aff tattoo (was `fitness` in shikudo, which is Monk-only) |
-
----
-
-## Lock Detection Rules (preserved verbatim)
-
-| Lock | Condition | Notes |
-| --- | --- | --- |
-| `softlock` | 3-of-4 in {anorexia, asthma, slickness, bloodfire} | Same as Levi |
-| `hardlock` | softlock + 1-of-{impatience, sandfever} | Same as Levi |
-| `truelock` | hardlock + paralysis | Same as Levi |
-| (treelock) | anorexia + asthma + slickness + paralysis (all 4) | Computed in original 005/007; never used in port branches |
-
----
-
-## Notes on the Original Code (preserved bugs / quirks)
-
-The port preserves these source-code quirks intentionally — they affect
-combat behavior and changing them risks breaking the user's muscle memory:
-
-1. **001's `addiciton` typo (line 43)**: `tAffs.addiciton` (missing letter)
-   in the early venom-insert. Port uses `has("addiction")` — typo silently
-   corrected, since the typo would have made the original branch dead.
-   This is the one deliberate behavioral fix.
-
-2. **004's headprep cascading IFs (impatience venoms)**: First three
-   conditionals all match different impatience/slickness/asthma combos and
-   write to the same `venoms[]` table by `insert` (appending). The LAST
-   insert wins for `venoms[1]`/`venoms[2]` slots because `insert` adds at
-   the end, so the FIRST inserted pair becomes the primary. Preserved.
-
-3. **005's envenom1 cascading vs envenom2 elseif**: Original `envenom1`
-   uses bare `if` blocks (cascading — LAST match wins). `envenom2` uses
-   `if/elseif` (FIRST match wins). Both behaviors preserved in port.
-
-4. **007's `prepped_leftleg` collision**: Source assigns
-   `prepped_leftleg = true` from a left-arm-prepped check (line 179) — a
-   typo. Port respects the per-limb separation (left arm doesn't write
-   into left leg). This is the second deliberate behavioral fix.
-
-5. **007's mixed precedence**: `lb[X] + scim1 >= 100 and not damaged and
-   tAffs.shield or tAffs.rebounding` parses as
-   `((lb + scim1 >= 100 and not damaged) and shield) or rebounding`,
-   which means "raze-prepped iff shielded, OR target is rebounding
-   regardless of prep state". Port preserves exact behavior via
-   `(prep_condition) and (shield or rebounding)` — meaning is debatable
-   but the runtime decision matches.
-
-6. **001's `or` precedence bug in NDB check**: Original line 222 has
-   `(ataxiaNDB_getClass(target) ~= "Apostate" or ataxiaNDB_getClass(target)) ~= "Priest"`
-   — broken parens, evaluates differently than intended. Since the entire
-   `add_dedication` branch is dead code (variable never read), dropped.
-
-7. **Per-mode auto-targeting (revision)**: The first port pass localised each
-   mode's `targetlimb`, so basic/riftlock lost the auto-pick they inherited from
-   the shared global in Levi and fell back to a fixed "right leg"; riftlock's
-   default `dsl` was also dropped to no-limb. Restored via `autoPickLimb()` /
-   `resolveLimb()`: basic drives the disembowel route, riftlock the salvelock-arm
-   route, and riftlock's default `dsl` slashes the resolved limb again (matches
-   `001_RIFT.lua:349`). disembowel/headprep/lockprep keep their inline pickers.
-   `rdwclimb` / the global still override.
-
----
-
-## Open Decisions
-
-- [x] File layout — one `dwc_runie.lua` consolidating all 7 sources (~970 lines).
-- [x] Aliases — `rrift`, `rbasic`, `rdism`, `rhead`, `rkelp`, `rlock`, plus
-      mode-router `rdwc` / `rdwcmode <m>` / `rdwclimb <limb>` / `rdwcstatus` /
-      `rdwcreset`. Each is a one-line wrapper. Original `xxx` and `kel`
-      aliases should rebind to `rhead()` and `rkelp()` respectively.
-- [x] `add_dedication` branch — dropped (computed but never used in any
-      attack-string construction).
-- [x] `softlock` local-in-001-thru-004 — dropped (computed but never read).
-- [x] `partyrelay` global — dropped (only referenced by removed `combatQueue`).
-- [x] `impale_blackout` global — dropped (computed but never read).
-- [x] `ataxiaNDB_getClass` — dropped (only used by dead `add_dedication` and
-      the per-class truelock branch in 007).
-- [x] `softlock` global mutation in `checkTargetLocks` — replaced with a
-      returned struct (`{soft, hard, true_}`).
-- [x] `tBals.salve` — mapped to `targetBalDown("salve")` reading
-      `ak.bals.salve == false`. Default-permissive (returns false when AK
-      doesn't track balances), which suppresses the riftlock kill route
-      until the user wires balance tracking. The user can override
-      `targetBalDown` directly if their AK uses a different shape.
-
----
-
-## TODO Punch List
-
-### A. Calibrate `dwcSlashDamage`  ⭐ HIGH
-The CONFIG default of 16 is a guess. Calibrate against a live target by
-running a known number of slashes and recording the resulting `lb[target]
-.hits[limb]` deltas. Adjust until the threshold detection (`>= 100`) lines
-up with actual breaks.
-
-### B. Wire up state flags  ⭐ HIGH
-The original had triggers updating `engaged`, `need_falcon`, `falconattack`,
-`inc_imp`. These now live under `runewarden.dwc.state.*`. Bind your existing
-triggers to update the state table — or write trigger shims.
-
-`targetlimb` no longer needs wiring: every mode auto-picks a limb on its own
-(basic → disembowel route torso→R leg→L leg; riftlock → salvelock route
-R arm→L arm→torso→legs; disembowel/headprep/lockprep keep their own routes).
-`rdwclimb` (`state.targetLimb`) / the legacy global still override when set.
-
-### C. Verify `ak.bals.salve` API  • MEDIUM
-Confirm AK exposes target salve balance as `ak.bals.salve` (boolean). If
-not, override `targetBalDown` with the correct read.
-
-### D. Rebound hold integration  • MEDIUM
-If you ported a rebound-hold module, override `runewarden.dwc.reboundGate`
-to delegate to it. The default stub never holds.
-
-### E. Falcon trigger logic  • LOW
-The `need_falcon` and `falconattack` flags are set externally by triggers
-on falcon land/return. Port these from the original profile or
-re-implement.
-
-### F. Item IDs  ⭐ HIGH
-Replace `scimitar1` / `scimitar2` / `bastard` in CONFIG with your actual
-wieldable item identifiers (numeric IDs or keyword refs).
+`dwc_runie_test.lua` (run `lua dwc_runie_test.lua` from this directory) stubs the
+host globals, drives all four plans through `M.arm()`/`compute_and_fire()`, and
+asserts the emitted `DWCATK` batch (wield/wipe, DSL venom order, BISECT forms,
+IMPALE/DISEMBOWEL gating, head-crack, EMPOWER/CONTEMPLATE, falcon gating, the
+nausea→disembowel delegation, the rift riftlock, and the SETALIAS+QUEUE pair).
+Exit code is non-zero on any failed assertion. Re-run after any logic change.
