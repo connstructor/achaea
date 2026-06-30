@@ -8,9 +8,7 @@ local M = runewarden.twoh
 -- Config (user-editable; preserved across reloads)
 -- =============================================================
 -- Weapon item names as they appear to WIELD
--- Per-weapon rune priority for EMPOWER PRIORITY SET (defensive re-emit each batch).
--- Sword and warhammer carry different runes, so each weapon kind keeps its own list;
--- the wielded weapon's list is emitted immediately after its WIELD.
+-- Static rune priority for EMPOWER PRIORITY SET (defensive re-emit each batch)
 -- Affliction "treat as present" threshold: affstrack.score[aff] >= aff_threshold
 -- Per-aff overrides win when present.
 -- e.g., nausea = 60,
@@ -28,53 +26,45 @@ local M = runewarden.twoh
 --   1. Filter out maxed (count >= max) and parry-blocked (no nausea bypass)
 --   2. If any remaining are under-min (count < min) → pick by config order
 --   3. Otherwise round-robin: fewest count first, config order as tiebreak
-M.config =
-  M.config or
-  {
-    bastard_sword = "bastard537498",
-    warhammer = "warhammer542360",
-    rune_priority =
-      {
-        sword = {"INGUZ", "SLEIZAK", "WUNJO"},
-        -- TODO: set the runes carved on your warhammer (BRAIN / OVERWHELM wield it).
-        warhammer = {"TODO_RUNE_1", "TODO_RUNE_2"},
-      },
-    aff_threshold = 50,
-    aff_threshold_overrides = {},
-    -- Latency-based arming: the dispatch is scheduled for (balance interval -
-    -- prearm) so it lands the instant balance returns (the server-side QUEUE
-    -- holds it). nil => getNetworkLatency() * 2.
-    prearm_interval = nil,
-    invalid_targets = {None = true, Dude = true},
-    aff_priority =
-      {
-        {aff = "nausea", venom = "EUPHORBIA"},
-        {aff = "paralysis", venom = "CURARE"},
-        {aff = "weariness", venom = "VERNALIUS"},
-        {aff = "asthma", venom = "KALMIA"},
-        {aff = "anorexia", venom = "SLIKE"},
-        {aff = "slickness", venom = "GECKO"},
-        {aff = "stupidity", venom = "ACONITE"},
-        {aff = "darkshade", venom = "DARKSHADE"},
-        {aff = "addiction", venom = "VARDRAX"},
-        {aff = "clumsiness", venom = "XENTIO"},
-        {aff = "dizziness", venom = "LARKSPUR"},
-        {aff = "sensitivity", venom = "PREFARAR"},
-        {aff = "recklessness", venom = "EURYPTERIA"},
-        {aff = "disloyalty", venom = "MONKSHOOD"},
-        {aff = "voyria", venom = "VOYRIA"},
-        {aff = "asleep", venom = "DELPHINIUM"},
-        {aff = "scytherus", venom = "SCYTHERUS"},
-        {aff = "shivering", venom = "NECHAMANDRA"},
-      },
-    limb_priority =
-      {
-        {loc = "tendons", min = 5, max = 7, attack = "HEW", parry = nil},
-        {loc = "skull", min = 5, max = 7, attack = "OVERHAND", parry = "head"},
-        {loc = "ribs", min = 5, max = 7, attack = "UNDERHAND", parry = "torso"},
-        {loc = "wrist", min = 1, max = 1, attack = "HEW", parry = nil},
-      },
-  }
+M.config = M.config
+	or {
+		bastard_sword = "bastard537498",
+		warhammer = "warhammer542360",
+		rune_priority = { "ISAZ", "SLEIZAK", "SOWULU" },
+		aff_threshold = 50,
+		aff_threshold_overrides = {},
+		-- Latency-based arming: the dispatch is scheduled for (balance interval -
+		-- prearm) so it lands the instant balance returns (the server-side QUEUE
+		-- holds it). nil => getNetworkLatency() * 2.
+		prearm_interval = nil,
+		invalid_targets = { None = true, Dude = true },
+		aff_priority = {
+			{ aff = "nausea", venom = "EUPHORBIA" },
+			{ aff = "paralysis", venom = "CURARE" },
+			{ aff = "weariness", venom = "VERNALIUS" },
+			{ aff = "asthma", venom = "KALMIA" },
+			{ aff = "anorexia", venom = "SLIKE" },
+			{ aff = "slickness", venom = "GECKO" },
+			{ aff = "stupidity", venom = "ACONITE" },
+			{ aff = "darkshade", venom = "DARKSHADE" },
+			{ aff = "addiction", venom = "VARDRAX" },
+			{ aff = "clumsiness", venom = "XENTIO" },
+			{ aff = "dizziness", venom = "LARKSPUR" },
+			{ aff = "sensitivity", venom = "PREFARAR" },
+			{ aff = "recklessness", venom = "EURYPTERIA" },
+			{ aff = "disloyalty", venom = "MONKSHOOD" },
+			{ aff = "voyria", venom = "VOYRIA" },
+			{ aff = "asleep", venom = "DELPHINIUM" },
+			{ aff = "scytherus", venom = "SCYTHERUS" },
+			{ aff = "shivering", venom = "NECHAMANDRA" },
+		},
+		limb_priority = {
+			{ loc = "tendons", min = 5, max = 7, attack = "HEW", parry = nil },
+			{ loc = "skull", min = 5, max = 7, attack = "OVERHAND", parry = "head" },
+			{ loc = "ribs", min = 5, max = 7, attack = "UNDERHAND", parry = "torso" },
+			{ loc = "wrist", min = 1, max = 1, attack = "HEW", parry = nil },
+		},
+	}
 -- =============================================================
 -- State (engine-managed; preserved across reloads)
 -- =============================================================
@@ -84,19 +74,18 @@ M.config =
 -- "ARMS" | "LEGS" | nil; one-shot manual DEVASTATE
 -- os.time() of most recent batch fire; used to
 -- gate on_balance_used so it doesn't spam outside combat
-M.state =
-  M.state or
-  {
-    armed = false,
-    focus_mode = "precision",
-    falcon_tracking = false,
-    falcon_slaying = false,
-    weapon_mode = "sword",
-    override_loc = nil,
-    override_side = nil,
-    devastate_pending = nil,
-    last_fire_time = 0,
-  }
+M.state = M.state
+	or {
+		armed = false,
+		focus_mode = "precision",
+		falcon_tracking = false,
+		falcon_slaying = false,
+		weapon_mode = "sword",
+		override_loc = nil,
+		override_side = nil,
+		devastate_pending = nil,
+		last_fire_time = 0,
+	}
 -- Note: overwhelm follow-up state lives in ak.overwhelmed (framework-maintained).
 -- =============================================================
 -- State read + helpers
@@ -104,19 +93,19 @@ M.state =
 -- Both balance and equilibrium ready? GMCP reports balances as "1"/"0" strings.
 
 local function on_eqbal()
-  return gmcp.Char.Vitals.bal == "1" and gmcp.Char.Vitals.eq == "1"
+	return gmcp.Char.Vitals.bal == "1" and gmcp.Char.Vitals.eq == "1"
 end
 
 -- A "real" target is non-empty and not in the invalid set ("None", "Dude", etc.)
 
 local function is_valid_target(t)
-  if not t or t == "" then
-    return false
-  end
-  if M.config.invalid_targets and M.config.invalid_targets[t] then
-    return false
-  end
-  return true
+	if not t or t == "" then
+		return false
+	end
+	if M.config.invalid_targets and M.config.invalid_targets[t] then
+		return false
+	end
+	return true
 end
 
 -- Snapshot of all decision-relevant framework state at one moment.
@@ -124,56 +113,55 @@ end
 -- (e.g., GMCP "1"/"0"), and downstream math/comparisons will throw if mixed.
 
 local function read_state()
-  -- Fractures
-  -- Afflictions: confidence table, accessed via aff_present()
-  -- affstrack.impale holds the name of who's doing the impaling, or "Me"
-  -- when it's us. We only care about our own impale chain.
-  -- Target HP (updated by FALCON REPORT / ASSESS)
-  -- Target defenses
-  -- Parry limb: lowercase, no spaces (e.g., "leftleg", "head", or nil)
-  -- Engagement (auto-clears on target switch, so truthy ⇒ engaged on current target)
-  -- Target currently overwhelmed (set by game's OVERWHELM response, self-clears
-  -- in ~6s if we don't BRAIN) → take the BRAIN follow-up
-  -- Our state
-  return
-    {
-      target = target,
-      skull = tonumber(ak.twoh.skull) or 0,
-      ribs = tonumber(ak.twoh.ribs) or 0,
-      wrist = tonumber(ak.twoh.wrist) or 0,
-      tendons = tonumber(ak.twoh.tendons) or 0,
-      aff = affstrack.score,
-      impaled = affstrack.impale == "Me",
-      hp_current = tonumber(ak.currenthealth) or 0,
-      hp_max = tonumber(ak.maxhealth) or 1,
-      rebounding = ak.defs.rebounding and not ignoreShield,
-      shield = ak.defs.shield and not ignoreShield,
-      targetparry = targetparry,
-      engaged = ak.engaged,
-      overwhelmed = ak.overwhelmed == true,
-      weapon_mode = M.state.weapon_mode,
-    }
+	-- Fractures
+	-- Afflictions: confidence table, accessed via aff_present()
+	-- affstrack.impale holds the name of who's doing the impaling, or "Me"
+	-- when it's us. We only care about our own impale chain.
+	-- Target HP (updated by FALCON REPORT / ASSESS)
+	-- Target defenses
+	-- Parry limb: lowercase, no spaces (e.g., "leftleg", "head", or nil)
+	-- Engagement (auto-clears on target switch, so truthy ⇒ engaged on current target)
+	-- Target currently overwhelmed (set by game's OVERWHELM response, self-clears
+	-- in ~6s if we don't BRAIN) → take the BRAIN follow-up
+	-- Our state
+	return {
+		target = target,
+		skull = tonumber(ak.twoh.skull) or 0,
+		ribs = tonumber(ak.twoh.ribs) or 0,
+		wrist = tonumber(ak.twoh.wrist) or 0,
+		tendons = tonumber(ak.twoh.tendons) or 0,
+		aff = affstrack.score,
+		impaled = affstrack.impale == "Me",
+		hp_current = tonumber(ak.currenthealth) or 0,
+		hp_max = tonumber(ak.maxhealth) or 1,
+		rebounding = ak.defs.rebounding and not ignoreShield,
+		shield = ak.defs.shield and not ignoreShield,
+		targetparry = targetparry,
+		engaged = ak.engaged,
+		overwhelmed = ak.overwhelmed == true,
+		weapon_mode = M.state.weapon_mode,
+	}
 end
 
 -- Treat affliction as present when confidence ≥ threshold (per-aff override wins)
 
 local function aff_present(state, name)
-  local th = M.config.aff_threshold_overrides[name] or M.config.aff_threshold
-  return (tonumber(state.aff[name]) or 0) >= th
+	local th = M.config.aff_threshold_overrides[name] or M.config.aff_threshold
+	return (tonumber(state.aff[name]) or 0) >= th
 end
 
 local function hp_pct(state)
-  return state.hp_current / state.hp_max
+	return state.hp_current / state.hp_max
 end
 
 local function nausea_bypass(state)
-  return aff_present(state, "nausea")
+	return aff_present(state, "nausea")
 end
 
 -- Path B kill math: OVERWHELM+BRAIN damage ≈ 9% of target max HP per skull fracture
 
 local function can_brain_kill(state)
-  return state.skull * 0.09 * state.hp_max >= state.hp_current
+	return state.skull * 0.09 * state.hp_max >= state.hp_current
 end
 
 -- =============================================================
@@ -189,53 +177,52 @@ end
 -- default
 -- user triggered xx
 -- user triggered cc
-local PHASE =
-  {
-    PATH_B_BRAIN = "path_b_brain",
-    PATH_A_DISEMBOWEL = "path_a_disembowel",
-    PATH_A_IMPALE = "path_a_impale",
-    PATH_C_BISECT = "path_c_bisect",
-    PATH_B_OVERWHELM = "path_b_overwhelm",
-    PATH_A_DEVASTATE = "path_a_devastate",
-    CARVE = "carve",
-    STACK = "stack",
-    MANUAL_DEVASTATE_ARMS = "manual_devastate_arms",
-    MANUAL_DEVASTATE_LEGS = "manual_devastate_legs",
-  }
+local PHASE = {
+	PATH_B_BRAIN = "path_b_brain",
+	PATH_A_DISEMBOWEL = "path_a_disembowel",
+	PATH_A_IMPALE = "path_a_impale",
+	PATH_C_BISECT = "path_c_bisect",
+	PATH_B_OVERWHELM = "path_b_overwhelm",
+	PATH_A_DEVASTATE = "path_a_devastate",
+	CARVE = "carve",
+	STACK = "stack",
+	MANUAL_DEVASTATE_ARMS = "manual_devastate_arms",
+	MANUAL_DEVASTATE_LEGS = "manual_devastate_legs",
+}
 
 local function select_phase(state)
-  -- 1. Continuation/execute phases that BYPASS shield+rebounding.
-  --    Order:
-  --      DISEMBOWEL — already committed to the impale chain, finish it
-  --      BISECT     — kill priority, beats IMPALE (don't waste prone window
-  --                   re-impaling when we can execute right now)
-  --      IMPALE     — set up the prone chain
-  if state.impaled then
-    return PHASE.PATH_A_DISEMBOWEL
-  end
-  if hp_pct(state) <= 0.25 then
-    return PHASE.PATH_C_BISECT
-  end
-  if (tonumber(state.aff.prone) or 0) >= 80 then
-    return PHASE.PATH_A_IMPALE
-  end
-  -- 2. Defense break — everything below bounces/fails on shield/rebound.
-  if state.rebounding or state.shield then
-    return PHASE.CARVE
-  end
-  -- 3. BRAIN follow-up (would bounce off rebound, so handled after CARVE)
-  if state.overwhelmed then
-    return PHASE.PATH_B_BRAIN
-  end
-  -- 4. New finisher commits
-  if can_brain_kill(state) then
-    return PHASE.PATH_B_OVERWHELM
-  end
-  if state.tendons >= 5 then
-    return PHASE.PATH_A_DEVASTATE
-  end
-  -- 5. Stack
-  return PHASE.STACK
+	-- 1. Continuation/execute phases that BYPASS shield+rebounding.
+	--    Order:
+	--      DISEMBOWEL — already committed to the impale chain, finish it
+	--      BISECT     — kill priority, beats IMPALE (don't waste prone window
+	--                   re-impaling when we can execute right now)
+	--      IMPALE     — set up the prone chain
+	if state.impaled then
+		return PHASE.PATH_A_DISEMBOWEL
+	end
+	if hp_pct(state) <= 0.25 then
+		return PHASE.PATH_C_BISECT
+	end
+	if (tonumber(state.aff.prone) or 0) >= 80 then
+		return PHASE.PATH_A_IMPALE
+	end
+	-- 2. Defense break — everything below bounces/fails on shield/rebound.
+	if state.rebounding or state.shield then
+		return PHASE.CARVE
+	end
+	-- 3. BRAIN follow-up (would bounce off rebound, so handled after CARVE)
+	if state.overwhelmed then
+		return PHASE.PATH_B_BRAIN
+	end
+	-- 4. New finisher commits
+	if can_brain_kill(state) then
+		return PHASE.PATH_B_OVERWHELM
+	end
+	if state.tendons >= 5 then
+		return PHASE.PATH_A_DEVASTATE
+	end
+	-- 5. Stack
+	return PHASE.STACK
 end
 
 -- =============================================================
@@ -243,63 +230,58 @@ end
 -- =============================================================
 
 local function select_stack_attack(state)
-  local nausea = nausea_bypass(state)
-  local count_for =
-    {skull = state.skull, wrist = state.wrist, tendons = state.tendons, ribs = state.ribs}
-  -- Build viable list with under-min flag. Sorted to balance attacks:
-  --   1. under-min entries first (preference for limbs that haven't reached their floor)
-  --   2. within same under-min status, fewest count first (round-robin)
-  --   3. config order as final tiebreak (so equal-count entries follow priority list)
-  local viable = {}
-  for order, entry in ipairs(M.config.limb_priority) do
-    local count = count_for[entry.loc]
-    if count >= entry.max then
-      -- skip — at or above max
-    elseif entry.parry and (not nausea) and state.targetparry == entry.parry then
-      -- skip — parried and no nausea bypass
-    else
-      viable[#viable + 1] =
-        {
-          loc = entry.loc,
-          count = count,
-          attack = entry.attack,
-          parry = entry.parry,
-          order = order,
-          under_min = count < entry.min,
-        }
-    end
-  end
-  table.sort(
-    viable,
-    function(a, b)
-      if a.under_min ~= b.under_min then
-        return a.under_min
-      end
-      -- under-min first
-      if a.count ~= b.count then
-        return a.count < b.count
-      end
-      -- fewest count first
-      return a.order < b.order
-      -- priority tiebreak
-    end
-  )
-  if #viable == 0 then
-    return nil
-    -- caller emits no main attack (should be unreachable in practice)
-  end
-  local pick = viable[1]
-  local out = {loc = pick.loc, attack = pick.attack, limb = nil}
-  if pick.attack == "HEW" then
-    local body = (pick.loc == "wrist") and "ARM" or "LEG"
-    local side = (math.random() < 0.5) and "LEFT" or "RIGHT"
-    -- Side-swap if matches parry (targetparry is concatenated lowercase: "leftleg" etc.)
-    if state.targetparry == (side:lower() .. body:lower()) then
-      side = (side == "LEFT") and "RIGHT" or "LEFT"
-    end
-    out.limb = side .. " " .. body
-  end
-  return out
+	local nausea = nausea_bypass(state)
+	local count_for = { skull = state.skull, wrist = state.wrist, tendons = state.tendons, ribs = state.ribs }
+	-- Build viable list with under-min flag. Sorted to balance attacks:
+	--   1. under-min entries first (preference for limbs that haven't reached their floor)
+	--   2. within same under-min status, fewest count first (round-robin)
+	--   3. config order as final tiebreak (so equal-count entries follow priority list)
+	local viable = {}
+	for order, entry in ipairs(M.config.limb_priority) do
+		local count = count_for[entry.loc]
+		if count >= entry.max then
+		-- skip — at or above max
+		elseif entry.parry and not nausea and state.targetparry == entry.parry then
+		-- skip — parried and no nausea bypass
+		else
+			viable[#viable + 1] = {
+				loc = entry.loc,
+				count = count,
+				attack = entry.attack,
+				parry = entry.parry,
+				order = order,
+				under_min = count < entry.min,
+			}
+		end
+	end
+	table.sort(viable, function(a, b)
+		if a.under_min ~= b.under_min then
+			return a.under_min
+		end
+		-- under-min first
+		if a.count ~= b.count then
+			return a.count < b.count
+		end
+		-- fewest count first
+		return a.order < b.order
+		-- priority tiebreak
+	end)
+	if #viable == 0 then
+		return nil
+		-- caller emits no main attack (should be unreachable in practice)
+	end
+	local pick = viable[1]
+	local out = { loc = pick.loc, attack = pick.attack, limb = nil }
+	if pick.attack == "HEW" then
+		local body = (pick.loc == "wrist") and "ARM" or "LEG"
+		local side = (math.random() < 0.5) and "LEFT" or "RIGHT"
+		-- Side-swap if matches parry (targetparry is concatenated lowercase: "leftleg" etc.)
+		if state.targetparry == (side:lower() .. body:lower()) then
+			side = (side == "LEFT") and "RIGHT" or "LEFT"
+		end
+		out.limb = side .. " " .. body
+	end
+	return out
 end
 
 -- Override pick: user has explicitly chosen a limb (and optionally a side).
@@ -307,28 +289,28 @@ end
 -- M.override() does the parry/defense safety checks; this builder just constructs.
 
 local function build_override_pick(state, loc, side)
-  local entry
-  for _, e in ipairs(M.config.limb_priority) do
-    if e.loc == loc then
-      entry = e
-      break
-    end
-  end
-  if not entry then
-    echo("[2H] Override: unknown limb '" .. tostring(loc) .. "'\n")
-    return nil
-  end
-  local out = {loc = entry.loc, attack = entry.attack, limb = nil}
-  if entry.attack == "HEW" then
-    local body = (entry.loc == "wrist") and "ARM" or "LEG"
-    local chosen_side = side or ((math.random() < 0.5) and "LEFT" or "RIGHT")
-    -- Side-swap if matches parry
-    if state.targetparry == (chosen_side:lower() .. body:lower()) then
-      chosen_side = (chosen_side == "LEFT") and "RIGHT" or "LEFT"
-    end
-    out.limb = chosen_side .. " " .. body
-  end
-  return out
+	local entry
+	for _, e in ipairs(M.config.limb_priority) do
+		if e.loc == loc then
+			entry = e
+			break
+		end
+	end
+	if not entry then
+		echo("[2H] Override: unknown limb '" .. tostring(loc) .. "'\n")
+		return nil
+	end
+	local out = { loc = entry.loc, attack = entry.attack, limb = nil }
+	if entry.attack == "HEW" then
+		local body = (entry.loc == "wrist") and "ARM" or "LEG"
+		local chosen_side = side or ((math.random() < 0.5) and "LEFT" or "RIGHT")
+		-- Side-swap if matches parry
+		if state.targetparry == (chosen_side:lower() .. body:lower()) then
+			chosen_side = (chosen_side == "LEFT") and "RIGHT" or "LEFT"
+		end
+		out.limb = chosen_side .. " " .. body
+	end
+	return out
 end
 
 -- =============================================================
@@ -336,67 +318,18 @@ end
 -- =============================================================
 
 local function pick_venom(state)
-  -- Venom availability assumed always-on; only gate on aff presence.
-  for _, entry in ipairs(M.config.aff_priority) do
-    if not aff_present(state, entry.aff) then
-      return entry.venom
-    end
-  end
-  return nil
+	-- Venom availability assumed always-on; only gate on aff presence.
+	for _, entry in ipairs(M.config.aff_priority) do
+		if not aff_present(state, entry.aff) then
+			return entry.venom
+		end
+	end
+	return nil
 end
 
--- Map a semantic weapon kind ("sword" | "warhammer") to its configured item id.
-local function weapon_id_for_kind(kind)
-  return (kind == "warhammer") and M.config.warhammer or M.config.bastard_sword
+local function weapon_for_mode(state)
+	return (state.weapon_mode == "sword") and M.config.bastard_sword or M.config.warhammer
 end
-
--- The weapon kind a phase fights with. Finisher phases pin a specific weapon:
--- BRAIN and OVERWHELM ride the warhammer; DISEMBOWEL / IMPALE / BISECT ride the
--- sword. Every other phase follows the user's weapon_mode toggle (ww).
-local PHASE_WEAPON_KIND =
-  {
-    [PHASE.PATH_B_BRAIN] = "warhammer",
-    [PHASE.PATH_B_OVERWHELM] = "warhammer",
-    [PHASE.PATH_A_DISEMBOWEL] = "sword",
-    [PHASE.PATH_A_IMPALE] = "sword",
-    [PHASE.PATH_C_BISECT] = "sword",
-  }
-
-local function weapon_kind_for_phase(state, phase)
-  return PHASE_WEAPON_KIND[phase] or state.weapon_mode
-end
-
--- Empower rune priority for a weapon kind. Sword and warhammer carry DIFFERENT
--- runes, so EMPOWER PRIORITY SET must list the runes on the wielded weapon.
--- Back-compat: an old flat-array config (single shared list) applies to both kinds.
-local function rune_priority_for(kind)
-  local rp = M.config.rune_priority
-  if rp[kind] then
-    return rp[kind]
-  end
-  if rp[1] then
-    return rp
-  end
-  return {}
-end
-
--- A rune list counts as "unset" if it is empty or still holds a TODO placeholder.
--- We skip EMPOWER for an unset list rather than feeding the game garbage rune names
--- (which it silently rejects, leaving the weapon's empower priority wrong mid-fight).
-local function rune_list_is_set(list)
-  if #list == 0 then
-    return false
-  end
-  for _, r in ipairs(list) do
-    if r:match("^TODO") then
-      return false
-    end
-  end
-  return true
-end
-
--- Warn at most once per weapon kind per load when its empower runes are unset.
-local empower_warned = {}
 
 -- For phases where weapon_mode applies (STACK, DEVASTATE flavors), this returns
 -- the venom we'd apply IF the current weapon supports it (sword only). Warhammer
@@ -404,22 +337,22 @@ local empower_warned = {}
 -- respects the user's mode preference rather than silently overriding to sword.
 
 local function venom_if_carryable(state, weapon)
-  if weapon ~= M.config.bastard_sword then
-    return nil
-  end
-  return pick_venom(state)
+	if weapon ~= M.config.bastard_sword then
+		return nil
+	end
+	return pick_venom(state)
 end
 
 -- Some attack commands rename based on the wielded weapon. This resolver maps
 -- an internal attack name (sword-equivalent) to the correct command for the
 -- current weapon. Add entries as new equivalences are confirmed.
-local HAMMER_ATTACK_NAME = {HEW = "PULVERISE", CARVE = "SPLINTER"}
+local HAMMER_ATTACK_NAME = { HEW = "PULVERISE", CARVE = "SPLINTER" }
 
 local function attack_command(attack, weapon)
-  if weapon == M.config.warhammer and HAMMER_ATTACK_NAME[attack] then
-    return HAMMER_ATTACK_NAME[attack]
-  end
-  return attack
+	if weapon == M.config.warhammer and HAMMER_ATTACK_NAME[attack] then
+		return HAMMER_ATTACK_NAME[attack]
+	end
+	return attack
 end
 
 -- =============================================================
@@ -427,108 +360,106 @@ end
 -- =============================================================
 
 local function build_batch(state, phase)
-  local cmds = {}
+	local cmds = {}
+	local cfg = M.config
 
-  local function add(c)
-    cmds[#cmds + 1] = c
-  end
+	local function add(c)
+		cmds[#cmds + 1] = c
+	end
 
-  -- Prefix (always emitted)
-  add("RECOVER FOOTING")
-  if not M.state.falcon_tracking then
-    add("FALCON TRACK " .. target)
-    runewarden.twoh.state.falcon_tracking = true
-  end
-  if not M.state.falcon_slaying then
-    add("FALCON SLAY " .. target)
-    runewarden.twoh.state.falcon_slaying = true
-  end
-  add("FALCON REPORT")
-  add("BATTLEFURY PERCEIVE " .. state.target)
-  -- Weapon + empower. Wield the phase's weapon, then set the empower priority to
-  -- THAT weapon's runes: sword and warhammer carry different runes, so one list
-  -- can't serve both. Empower must FOLLOW the wield (SnB/DWC convention) so it
-  -- targets the just-wielded weapon, not whatever the previous batch left in hand.
-  local kind = weapon_kind_for_phase(state, phase)
-  local weapon = weapon_id_for_kind(kind)
-  add("WIELD " .. weapon)
-  -- Empower only when the wielded weapon actually has runes configured; otherwise
-  -- skip it (and warn once) so an unfilled warhammer set can't send garbage runes.
-  local runes = rune_priority_for(kind)
-  if rune_list_is_set(runes) then
-    add("EMPOWER PRIORITY SET " .. table.concat(runes, " "))
-  elseif not empower_warned[kind] then
-    empower_warned[kind] = true
-    boxEcho.send(
-      "[2H] No empower runes set for " ..
-      kind .. "; skipping EMPOWER. Fill in config.rune_priority." .. kind .. "."
-    )
-  end
-  -- Body (phase-dispatched) — weapon is already wielded above.
-  if phase == PHASE.PATH_B_BRAIN then
-    add("BRAIN " .. state.target)
-  elseif phase == PHASE.PATH_A_DISEMBOWEL then
-    add("DISEMBOWEL " .. state.target)
-    -- FURY rode the impale window; drop it once the chain finishes (same balance).
-    add("FURY OFF")
-  elseif phase == PHASE.PATH_A_IMPALE then
-    add("IMPALE " .. state.target)
-    -- Turn FURY on after the impale lands so the disembowel hits boosted (same balance).
-    add("FURY ON")
-  elseif phase == PHASE.PATH_C_BISECT then
-    local venom = pick_venom(state)
-    -- BISECT venom is inline (per help: `BISECT <target> [venom]`), not via ENVENOM
-    add("BISECT " .. state.target .. (venom and (" " .. venom) or ""))
-  elseif phase == PHASE.PATH_B_OVERWHELM then
-    add("BATTLEFURY OVERWHELM " .. state.target)
-  elseif phase == PHASE.PATH_A_DEVASTATE then
-    -- DEVASTATE takes inline venom — only carried by sword (warhammer ⇒ nil).
-    local venom = venom_if_carryable(state, weapon)
-    add("DEVASTATE " .. state.target .. " LEGS" .. (venom and (" " .. venom) or ""))
-    add("BATTLEFURY UPSET " .. state.target)
-  elseif phase == PHASE.CARVE then
-    -- CARVE/SPLINTER name depends on weapon. WIPE+ENVENOM only when sword.
-    local venom = venom_if_carryable(state, weapon)
-    if venom then
-      add("WIPE " .. weapon)
-      add("ENVENOM " .. weapon .. " WITH " .. venom)
-    end
-    add(attack_command("CARVE", weapon) .. " " .. state.target)
-  elseif phase == PHASE.MANUAL_DEVASTATE_ARMS then
-    local venom = venom_if_carryable(state, weapon)
-    add("DEVASTATE " .. state.target .. " ARMS" .. (venom and (" " .. venom) or ""))
-  elseif phase == PHASE.MANUAL_DEVASTATE_LEGS then
-    local venom = venom_if_carryable(state, weapon)
-    add("DEVASTATE " .. state.target .. " LEGS" .. (venom and (" " .. venom) or ""))
-    add("BATTLEFURY UPSET " .. state.target)
-  elseif phase == PHASE.STACK then
-    local pick
-    if M.state.override_loc then
-      pick = build_override_pick(state, M.state.override_loc, M.state.override_side)
-    else
-      pick = select_stack_attack(state)
-    end
-    if pick then
-      local venom = venom_if_carryable(state, weapon)
-      if venom then
-        add("WIPE " .. weapon)
-        add("ENVENOM " .. weapon .. " WITH " .. venom)
-      end
-      add("BATTLEFURY FOCUS " .. M.state.focus_mode)
-      if pick.attack == "HEW" then
-        add(attack_command("HEW", weapon) .. " " .. state.target .. " " .. pick.limb)
-      else
-        add(attack_command(pick.attack, weapon) .. " " .. state.target)
-      end
-    end
-    -- If pick is nil (everything blocked or bad override), no main attack
-  end
-  -- Suffix (always emitted)
-  add("ASSESS")
-  if not state.engaged then
-    add("ENGAGE " .. state.target)
-  end
-  return cmds
+	-- Prefix (always emitted)
+	add("RECOVER FOOTING")
+	add("EMPOWER PRIORITY SET " .. table.concat(cfg.rune_priority, " "))
+	if not M.state.falcon_tracking then
+		add("FALCON TRACK " .. target)
+		runewarden.twoh.state.falcon_tracking = true
+	end
+	if not M.state.falcon_slaying then
+		add("FALCON SLAY " .. target)
+		runewarden.twoh.state.falcon_slaying = true
+	end
+	add("FALCON REPORT")
+	add("BATTLEFURY PERCEIVE " .. state.target)
+	-- Body (phase-dispatched)
+	if phase == PHASE.PATH_B_BRAIN then
+		add("WIELD " .. cfg.warhammer)
+		add("BRAIN " .. state.target)
+	elseif phase == PHASE.PATH_A_DISEMBOWEL then
+		add("WIELD " .. cfg.bastard_sword)
+		add("DISEMBOWEL " .. state.target)
+		-- FURY rode the impale window; drop it once the chain finishes (same balance).
+		add("FURY OFF")
+	elseif phase == PHASE.PATH_A_IMPALE then
+		add("WIELD " .. cfg.bastard_sword)
+		add("IMPALE " .. state.target)
+		-- Turn FURY on after the impale lands so the disembowel hits boosted (same balance).
+		add("FURY ON")
+	elseif phase == PHASE.PATH_C_BISECT then
+		add("WIELD " .. cfg.bastard_sword)
+		local venom = pick_venom(state)
+		-- BISECT venom is inline (per help: `BISECT <target> [venom]`), not via ENVENOM
+		add("BISECT " .. state.target .. (venom and (" " .. venom) or ""))
+	elseif phase == PHASE.PATH_B_OVERWHELM then
+		add("WIELD " .. cfg.warhammer)
+		add("BATTLEFURY OVERWHELM " .. state.target)
+	elseif phase == PHASE.PATH_A_DEVASTATE then
+		-- DEVASTATE takes inline venom — only carried by sword. weapon_mode wins.
+		local weapon = weapon_for_mode(state)
+		local venom = venom_if_carryable(state, weapon)
+		add("WIELD " .. weapon)
+		add("DEVASTATE " .. state.target .. " LEGS" .. (venom and (" " .. venom) or ""))
+		add("BATTLEFURY UPSET " .. state.target)
+	elseif phase == PHASE.CARVE then
+		-- CARVE/SPLINTER name depends on weapon. WIPE+ENVENOM only when sword.
+		local weapon = weapon_for_mode(state)
+		local venom = venom_if_carryable(state, weapon)
+		add("WIELD " .. weapon)
+		if venom then
+			add("WIPE " .. weapon)
+			add("ENVENOM " .. weapon .. " WITH " .. venom)
+		end
+		add(attack_command("CARVE", weapon) .. " " .. state.target)
+	elseif phase == PHASE.MANUAL_DEVASTATE_ARMS then
+		local weapon = weapon_for_mode(state)
+		local venom = venom_if_carryable(state, weapon)
+		add("WIELD " .. weapon)
+		add("DEVASTATE " .. state.target .. " ARMS" .. (venom and (" " .. venom) or ""))
+	elseif phase == PHASE.MANUAL_DEVASTATE_LEGS then
+		local weapon = weapon_for_mode(state)
+		local venom = venom_if_carryable(state, weapon)
+		add("WIELD " .. weapon)
+		add("DEVASTATE " .. state.target .. " LEGS" .. (venom and (" " .. venom) or ""))
+		add("BATTLEFURY UPSET " .. state.target)
+	elseif phase == PHASE.STACK then
+		local pick
+		if M.state.override_loc then
+			pick = build_override_pick(state, M.state.override_loc, M.state.override_side)
+		else
+			pick = select_stack_attack(state)
+		end
+		if pick then
+			local weapon = weapon_for_mode(state)
+			local venom = venom_if_carryable(state, weapon)
+			add("WIELD " .. weapon)
+			if venom then
+				add("WIPE " .. weapon)
+				add("ENVENOM " .. weapon .. " WITH " .. venom)
+			end
+			add("BATTLEFURY FOCUS " .. M.state.focus_mode)
+			if pick.attack == "HEW" then
+				add(attack_command("HEW", weapon) .. " " .. state.target .. " " .. pick.limb)
+			else
+				add(attack_command(pick.attack, weapon) .. " " .. state.target)
+			end
+		end
+		-- If pick is nil (everything blocked or bad override), no main attack
+	end
+	-- Suffix (always emitted)
+	add("ASSESS")
+	if not state.engaged then
+		add("ENGAGE " .. state.target)
+	end
+	return cmds
 end
 
 -- =============================================================
@@ -537,12 +468,12 @@ end
 -- Look up a limb_priority entry by loc (for parry/safety checks). Returns nil if unknown.
 
 local function find_limb_entry(loc)
-  for _, e in ipairs(M.config.limb_priority) do
-    if e.loc == loc then
-      return e
-    end
-  end
-  return nil
+	for _, e in ipairs(M.config.limb_priority) do
+		if e.loc == loc then
+			return e
+		end
+	end
+	return nil
 end
 
 -- Minimum fractures to commit a manual DEVASTATE. 4 = level-2 break; below that
@@ -553,85 +484,82 @@ local DEVASTATE_MIN_FRACTURES = 4
 --   - Execute (BISECT) — kill priority
 --   - CARVE — clearing defenses (any attack-based manual mode would bounce)
 --   - BRAIN follow-up — we already committed to the kill via OVERWHELM
-local OVERRIDE_PROTECTED =
-  {
-    [PHASE.PATH_A_DISEMBOWEL] = true,
-    [PHASE.PATH_A_IMPALE] = true,
-    [PHASE.PATH_C_BISECT] = true,
-    [PHASE.CARVE] = true,
-    [PHASE.PATH_B_BRAIN] = true,
-  }
+local OVERRIDE_PROTECTED = {
+	[PHASE.PATH_A_DISEMBOWEL] = true,
+	[PHASE.PATH_A_IMPALE] = true,
+	[PHASE.PATH_C_BISECT] = true,
+	[PHASE.CARVE] = true,
+	[PHASE.PATH_B_BRAIN] = true,
+}
 
 local function compute_and_fire()
-  local state = read_state()
-  if not is_valid_target(state.target) then
-    -- No usable target → clear any queued operating mode so we don't carry stale intent
-    M.state.override_loc = nil
-    M.state.override_side = nil
-    M.state.devastate_pending = nil
-    return
-  end
-  -- Compute the auto-cascade choice first. Manual modes can only override
-  -- when the auto choice isn't a continuation/execute/CARVE phase.
-  local auto_phase = select_phase(state)
-  local phase
-  if OVERRIDE_PROTECTED[auto_phase] then
-    phase = auto_phase
-  elseif M.state.devastate_pending == "ARMS" then
-    if state.wrist >= DEVASTATE_MIN_FRACTURES then
-      phase = PHASE.MANUAL_DEVASTATE_ARMS
-    else
-      boxEcho.send(
-        "[2H] DEVASTATE ARMS BLOCKED: only " ..
-        state.wrist ..
-        " wrist fractures (need " ..
-        DEVASTATE_MIN_FRACTURES ..
-        "+). FALLING BACK TO AUTO."
-      )
-      phase = auto_phase
-    end
-  elseif M.state.devastate_pending == "LEGS" then
-    if state.tendons >= DEVASTATE_MIN_FRACTURES then
-      phase = PHASE.MANUAL_DEVASTATE_LEGS
-    else
-      boxEcho.send(
-        "[2H] DEVASTATE LEGS BLOCKED: only " ..
-        state.tendons ..
-        " tendon fractures (need " ..
-        DEVASTATE_MIN_FRACTURES ..
-        "+). FALLING BACK TO AUTO."
-      )
-      phase = auto_phase
-    end
-  elseif M.state.override_loc then
-    -- Late parry check on head/torso. (Arms/legs HEW side-swaps naturally.)
-    local entry = find_limb_entry(M.state.override_loc)
-    if
-      entry and entry.parry and (not nausea_bypass(state)) and state.targetparry == entry.parry
-    then
-      boxEcho.send(
-        "[2H] OVERRIDE BLOCKED: " ..
-        string.upper(entry.parry) ..
-        " IS PARRIED AND NO NAUSEA. FALLING BACK TO AUTO."
-      )
-      phase = auto_phase
-    else
-      phase = PHASE.STACK
-    end
-  else
-    phase = auto_phase
-  end
-  local cmds = build_batch(state, phase)
-  boxEcho.send("FIRE")
-  send("SETALIAS TWOHATK " .. table.concat(cmds, "/"))
-  send("QUEUE ADDCLEARFULL FREE TWOHATK")
-  -- Record fire time so on_balance_used can tell combat balance use from
-  -- non-combat (chopping wood, eating, etc.) and skip the pre-fetch when idle.
-  M.state.last_fire_time = os.time()
-  -- One-shot: clear all manual flags after firing
-  M.state.override_loc = nil
-  M.state.override_side = nil
-  M.state.devastate_pending = nil
+	local state = read_state()
+	if not is_valid_target(state.target) then
+		-- No usable target → clear any queued operating mode so we don't carry stale intent
+		M.state.override_loc = nil
+		M.state.override_side = nil
+		M.state.devastate_pending = nil
+		return
+	end
+	-- Compute the auto-cascade choice first. Manual modes can only override
+	-- when the auto choice isn't a continuation/execute/CARVE phase.
+	local auto_phase = select_phase(state)
+	local phase
+	if OVERRIDE_PROTECTED[auto_phase] then
+		phase = auto_phase
+	elseif M.state.devastate_pending == "ARMS" then
+		if state.wrist >= DEVASTATE_MIN_FRACTURES then
+			phase = PHASE.MANUAL_DEVASTATE_ARMS
+		else
+			boxEcho.send(
+				"[2H] DEVASTATE ARMS BLOCKED: only "
+					.. state.wrist
+					.. " wrist fractures (need "
+					.. DEVASTATE_MIN_FRACTURES
+					.. "+). FALLING BACK TO AUTO."
+			)
+			phase = auto_phase
+		end
+	elseif M.state.devastate_pending == "LEGS" then
+		if state.tendons >= DEVASTATE_MIN_FRACTURES then
+			phase = PHASE.MANUAL_DEVASTATE_LEGS
+		else
+			boxEcho.send(
+				"[2H] DEVASTATE LEGS BLOCKED: only "
+					.. state.tendons
+					.. " tendon fractures (need "
+					.. DEVASTATE_MIN_FRACTURES
+					.. "+). FALLING BACK TO AUTO."
+			)
+			phase = auto_phase
+		end
+	elseif M.state.override_loc then
+		-- Late parry check on head/torso. (Arms/legs HEW side-swaps naturally.)
+		local entry = find_limb_entry(M.state.override_loc)
+		if entry and entry.parry and (not nausea_bypass(state)) and state.targetparry == entry.parry then
+			boxEcho.send(
+				"[2H] OVERRIDE BLOCKED: "
+					.. string.upper(entry.parry)
+					.. " IS PARRIED AND NO NAUSEA. FALLING BACK TO AUTO."
+			)
+			phase = auto_phase
+		else
+			phase = PHASE.STACK
+		end
+	else
+		phase = auto_phase
+	end
+	local cmds = build_batch(state, phase)
+	boxEcho.send("FIRE")
+	send("SETALIAS TWOHATK " .. table.concat(cmds, "/"))
+	send("QUEUE ADDCLEARFULL FREE TWOHATK")
+	-- Record fire time so on_balance_used can tell combat balance use from
+	-- non-combat (chopping wood, eating, etc.) and skip the pre-fetch when idle.
+	M.state.last_fire_time = os.time()
+	-- One-shot: clear all manual flags after firing
+	M.state.override_loc = nil
+	M.state.override_side = nil
+	M.state.devastate_pending = nil
 end
 
 -- =============================================================
@@ -639,29 +567,45 @@ end
 -- =============================================================
 -- Alias 'zz' — arm for next balance window, or fire immediately if EQBAL ready
 
-function M.arm()
-  if not is_valid_target(target) then
-    boxEcho.send("[2H] Not arming: target is '" .. tostring(target) .. "'.")
-    return
-  end
-  if on_eqbal() then
-    compute_and_fire()
-  else
-    boxEcho.send("ARMED")
-    M.state.armed = true
-  end
+function M.arm(opts)
+	opts = opts or {}
+	-- Combat API: route opts.devastate / opts.override through the existing
+	-- one-shot setters. Each sets state then re-enters M.arm() with no opts,
+	-- falling through to the plain-arm path below (no recursion, no duplication).
+	if opts.devastate then
+		local d = string.upper(tostring(opts.devastate))
+		if d == "ARMS" then
+			return M.devastate_arms()
+		elseif d == "LEGS" then
+			return M.devastate_legs()
+		end
+		echo("[2H] Devastate must be ARMS or LEGS (got '" .. tostring(opts.devastate) .. "').\n")
+		return
+	elseif opts.override then
+		return M.override(opts.override, opts.side)
+	end
+	if not is_valid_target(target) then
+		boxEcho.send("[2H] Not arming: target is '" .. tostring(target) .. "'.")
+		return
+	end
+	if on_eqbal() then
+		compute_and_fire()
+	else
+		boxEcho.send("ARMED")
+		M.state.armed = true
+	end
 end
 
 -- Alias 'ww' — toggle weapon mode between sword and warhammer
 
 function M.toggle_weapon_mode()
-  M.state.weapon_mode = (M.state.weapon_mode == "sword") and "warhammer" or "sword"
-  echo("[2H] Weapon mode: " .. M.state.weapon_mode .. "\n")
+	M.state.weapon_mode = (M.state.weapon_mode == "sword") and "warhammer" or "sword"
+	echo("[2H] Weapon mode: " .. M.state.weapon_mode .. "\n")
 end
 
 function M.toggle_focus_mode()
-  M.state.focus_mode = (M.state.focus_mode == "precision") and "speed" or "precision"
-  echo("[2H] Focus mode: " .. M.state.focus_mode .. "\n")
+	M.state.focus_mode = (M.state.focus_mode == "precision") and "speed" or "precision"
+	echo("[2H] Focus mode: " .. M.state.focus_mode .. "\n")
 end
 
 -- Override: queue an operating mode. The actual fire (and all safety checks) happen
@@ -671,42 +615,42 @@ end
 --   side: optional "LEFT" | "RIGHT", only meaningful for wrist/tendons
 
 function M.override(loc, side)
-  -- Only validation done here is "is this a known limb keyword?" That's
-  -- programmer-error, not state-dependent.
-  local known = false
-  for _, e in ipairs(M.config.limb_priority) do
-    if e.loc == loc then
-      known = true;
-      break
-    end
-  end
-  if not known then
-    echo("[2H] Override: '" .. tostring(loc) .. "' is not a configured limb.\n")
-    return
-  end
-  M.state.devastate_pending = nil
-  M.state.override_loc = loc
-  M.state.override_side = side
-  M.arm()
+	-- Only validation done here is "is this a known limb keyword?" That's
+	-- programmer-error, not state-dependent.
+	local known = false
+	for _, e in ipairs(M.config.limb_priority) do
+		if e.loc == loc then
+			known = true
+			break
+		end
+	end
+	if not known then
+		echo("[2H] Override: '" .. tostring(loc) .. "' is not a configured limb.\n")
+		return
+	end
+	M.state.devastate_pending = nil
+	M.state.override_loc = loc
+	M.state.override_side = side
+	M.arm()
 end
 
 -- Alias 'xx' — queue DEVASTATE ARMS as the operating mode. Safety/fracture checks
 -- happen at fire time in compute_and_fire.
 
 function M.devastate_arms()
-  M.state.override_loc = nil
-  M.state.override_side = nil
-  M.state.devastate_pending = "ARMS"
-  M.arm()
+	M.state.override_loc = nil
+	M.state.override_side = nil
+	M.state.devastate_pending = "ARMS"
+	M.arm()
 end
 
 -- Alias 'cc' — queue DEVASTATE LEGS as the operating mode.
 
 function M.devastate_legs()
-  M.state.override_loc = nil
-  M.state.override_side = nil
-  M.state.devastate_pending = "LEGS"
-  M.arm()
+	M.state.override_loc = nil
+	M.state.override_side = nil
+	M.state.devastate_pending = "LEGS"
+	M.arm()
 end
 
 -- =============================================================
@@ -718,92 +662,81 @@ end
 -- the multiple fragments of a single PERCEIVE response collapse into one
 -- render.
 -- =============================================================
-M.perceive = M.perceive or {target = nil, parry = nil, timer_id = nil}
+M.perceive = M.perceive or { target = nil, parry = nil, timer_id = nil }
 
 local function schedule_perceive_render()
-  if M.perceive.timer_id then
-    killTimer(M.perceive.timer_id)
-  end
-  M.perceive.timer_id =
-    tempTimer(
-      0.1,
-      function()
-        M.perceive.timer_id = nil
-        M.perceive_render()
-      end
-    )
+	if M.perceive.timer_id then
+		killTimer(M.perceive.timer_id)
+	end
+	M.perceive.timer_id = tempTimer(0.1, function()
+		M.perceive.timer_id = nil
+		M.perceive_render()
+	end)
 end
 
 -- Called by any of the 4 fracture-line triggers. We only need the target name;
 -- the actual counts are read off ak.twoh.* at render time (framework-maintained).
 
 function M.perceive_fracture(target_name)
-  M.perceive.target = target_name
-  schedule_perceive_render()
+	M.perceive.target = target_name
+	schedule_perceive_render()
 end
 
 function M.perceive_parry(target_name, limb)
-  M.perceive.target = target_name
-  M.perceive.parry = limb
-  schedule_perceive_render()
+	M.perceive.target = target_name
+	M.perceive.parry = limb
+	schedule_perceive_render()
 end
 
 function M.perceive_no_parry(target_name)
-  M.perceive.target = target_name
-  M.perceive.parry = nil
-  schedule_perceive_render()
+	M.perceive.target = target_name
+	M.perceive.parry = nil
+	schedule_perceive_render()
 end
 
 local function frac_color(count)
-  if count >= 6 then
-    return "<red>"
-  elseif count >= 4 then
-    return "<yellow>"
-  else
-    return "<green>"
-  end
+	if count >= 6 then
+		return "<red>"
+	elseif count >= 4 then
+		return "<yellow>"
+	else
+		return "<green>"
+	end
 end
 
 local function hp_color(pct)
-  if pct <= 25 then
-    return "<red>"
-  elseif pct <= 50 then
-    return "<yellow>"
-  else
-    return "<green>"
-  end
+	if pct <= 25 then
+		return "<red>"
+	elseif pct <= 50 then
+		return "<yellow>"
+	else
+		return "<green>"
+	end
 end
 
 local function bar(filled, total)
-  return string.rep("|", filled) .. string.rep("-", total - filled)
+	return string.rep("|", filled) .. string.rep("-", total - filled)
 end
 
 function M.perceive_render()
-  local p = M.perceive
-  local hp_max = tonumber(ak.maxhealth) or 1
-  local hp_cur = tonumber(ak.currenthealth) or 0
-  local hp_pct = math.floor(hp_cur / hp_max * 100)
-  local hp_n = math.floor(hp_pct / 10)
+	local p = M.perceive
+	local hp_max = tonumber(ak.maxhealth) or 1
+	local hp_cur = tonumber(ak.currenthealth) or 0
+	local hp_pct = math.floor(hp_cur / hp_max * 100)
+	local hp_n = math.floor(hp_pct / 10)
 
-  local function frac_line(label, count)
-    return
-      string.format(
-        "<cyan>%-7s<white>: %s%s<reset> %d/7\n", label, frac_color(count), bar(count, 7), count
-      )
-  end
+	local function frac_line(label, count)
+		return string.format("<cyan>%-7s<white>: %s%s<reset> %d/7\n", label, frac_color(count), bar(count, 7), count)
+	end
 
-  cecho("\n")
-  cecho(string.format("<cyan>Target <white>: <orange>%s\n", read_state().target or "?"))
-  cecho(
-    string.format(
-      "<yellow>HP     <white>: %s%s<reset> %3d%%\n", hp_color(hp_pct), bar(hp_n, 10), hp_pct
-    )
-  )
-  cecho(frac_line("Skull", tonumber(ak.twoh.skull) or 0))
-  cecho(frac_line("Ribs", tonumber(ak.twoh.ribs) or 0))
-  cecho(frac_line("Wrist", tonumber(ak.twoh.wrist) or 0))
-  cecho(frac_line("Tendons", tonumber(ak.twoh.tendons) or 0))
-  cecho(string.format("<yellow>Parry  <white>: <orange>%s\n", read_state().targetparry or "none"))
+	cecho("\n")
+	cecho(string.format("<cyan>Target <white>: <orange>%s\n", read_state().target or "?"))
+	cecho(string.format("<yellow>HP     <white>: %s%s<reset> %3d%%\n", hp_color(hp_pct), bar(hp_n, 10), hp_pct))
+	cecho(frac_line("Skull", tonumber(ak.twoh.skull) or 0))
+	cecho(frac_line("Ribs", tonumber(ak.twoh.ribs) or 0))
+	cecho(frac_line("Wrist", tonumber(ak.twoh.wrist) or 0))
+	cecho(frac_line("Tendons", tonumber(ak.twoh.tendons) or 0))
+	cecho(string.format("<yellow>Parry  <white>: <orange>%s\n", read_state().targetparry or "none"))
 end
 
 -- Trigger handler for "Balance used: <N>s." This is the latency-based arming
@@ -820,55 +753,118 @@ local BALANCE_USED_COMBAT_WINDOW = 10
 -- How far ahead of the dispatch the intel pre-fetch runs.
 local PERCEIVE_LEAD = 0.5
 
-function M.on_balance_used(seconds)
-  if os.time() - (M.state.last_fire_time or 0) > BALANCE_USED_COMBAT_WINDOW then
-    return
-  end
-  if not is_valid_target(target) then
-    return
-  end
-  local interval = tonumber(seconds) or 0
-  if interval <= 0 then
-    return
-  end
-  local prearm = M.config.prearm_interval or (getNetworkLatency() * 2)
-  local fire_delay = math.max(0, interval - prearm)
-  local perceive_delay = math.max(0, fire_delay - PERCEIVE_LEAD)
+function M.onBalanceUsed(seconds)
+	if os.time() - (M.state.last_fire_time or 0) > BALANCE_USED_COMBAT_WINDOW then
+		return
+	end
+	if not is_valid_target(target) then
+		return
+	end
+	local interval = tonumber(seconds) or 0
+	if interval <= 0 then
+		return
+	end
+	local prearm = M.config.prearm_interval or (getNetworkLatency() * 2)
+	local fire_delay = math.max(0, interval - prearm)
+	local perceive_delay = math.max(0, fire_delay - PERCEIVE_LEAD)
 
-  -- Intel pre-fetch: refresh target state 0.5s before the dispatch, but only if
-  -- we're actually committed to firing (armed) -- no PERCEIVE spam otherwise.
-  tempTimer(
-    perceive_delay,
-    function()
-      if M.state.armed and is_valid_target(target) then
-        send("FALCON REPORT")
-        send("BATTLEFURY PERCEIVE " .. target)
-      end
-    end
-  )
+	-- Intel pre-fetch: refresh target state 0.5s before the dispatch, but only if
+	-- we're actually committed to firing (armed) -- no PERCEIVE spam otherwise.
+	tempTimer(perceive_delay, function()
+		if M.state.armed and is_valid_target(target) then
+			send("FALCON REPORT")
+			send("BATTLEFURY PERCEIVE " .. target)
+		end
+	end)
 
-  -- Dispatch: fire the batch as balance returns, from current (just-refreshed)
-  -- state. One-shot arm, mirroring Sentinel: disarm before firing.
-  tempTimer(
-    fire_delay,
-    function()
-      if M.state.armed then
-        M.state.armed = false
-        compute_and_fire()
-      end
-    end
-  )
+	-- Dispatch: fire the batch as balance returns, from current (just-refreshed)
+	-- state. One-shot arm, mirroring Sentinel: disarm before firing.
+	tempTimer(fire_delay, function()
+		if M.state.armed then
+			M.state.armed = false
+			compute_and_fire()
+		end
+	end)
 end
 
 -- gmcp.Char.Vitals handler — fires on bal/eq/hp/mana updates
 
 function M.on_gmcp_char_vitals(_event)
-  -- Firing is driven entirely by the prearm dispatch timer (see on_balance_used),
-  -- so vitals updates no longer trigger the batch. Kept as a registered handler
-  -- in case non-firing vitals work is added later.
+	-- Firing is driven entirely by the prearm dispatch timer (see on_balance_used),
+	-- so vitals updates no longer trigger the batch. Kept as a registered handler
+	-- in case non-firing vitals work is added later.
 end
 
 -- All aliases, keys, and event handlers are configured as permanent objects in
 -- the Mudlet UI (see project README / setup notes). The script provides only
 -- the engine logic and namespace; UI objects call into runewarden.twoh.*.
 boxEcho.send("[2H] Combat engine loaded.")
+
+-- =============================================================
+-- Combat module API (see ports/legacy_ak/utility/COMBAT_FRAMEWORK.md). 2H
+-- implements the standard contract directly on runewarden.twoh. arm() above is
+-- the offensive trigger (opts route devastate/override); onBalanceUsed and the
+-- ww/focus toggles stay as the module's own entry points. onTarget/onClearTarget
+-- are a verbatim port of the old Runewarden branch in utility/target.lua.
+-- =============================================================
+M.id = "runewarden.twoh"
+M.jitBalance = true
+
+-- Soft reset of offensive state (between targets / on teardown). Pure state clear,
+-- no sends: drops the armed swing, falcon flags, one-shot override/devastate, and
+-- the combat-window timestamp; KEEPS user modes (focus_mode, weapon_mode). Any
+-- pending dispatch timer self-cancels because it gates on M.state.armed.
+function M.reset()
+	M.state.armed = false
+	M.state.falcon_tracking = false
+	M.state.falcon_slaying = false
+	M.state.override_loc = nil
+	M.state.override_side = nil
+	M.state.devastate_pending = nil
+	M.state.last_fire_time = 0
+	if M.perceive and M.perceive.timer_id then
+		killTimer(M.perceive.timer_id)
+		M.perceive.timer_id = nil
+	end
+end
+
+-- New valid target: re-issue falcon tracking for the new target on next fire,
+-- report, set parry. Verbatim port of the old 2H branch. Deliberately does NOT
+-- full-reset, so a mid-combat target switch stays armed/firing.
+function M.onTarget(name)
+	M.state.falcon_tracking = false
+	M.state.falcon_slaying = false
+	send("FALCON REPORT")
+	send("parry " .. (currentparry or "head"), false)
+end
+
+-- Target cleared (still 2H): full reset, then stop pressuring and recall the falcon.
+function M.onClearTarget()
+	M.reset()
+	send("DISENGAGE")
+	send("FURY OFF")
+	send("FALCON RECALL")
+end
+
+-- Switched away from 2H entirely: same teardown as clearing the target.
+function M.deactivate()
+	M.onClearTarget()
+end
+
+-- Back-compat alias for the existing hand-wired "Balance used" trigger; remove
+-- once it calls combat.onBalanceUsed().
+M.on_balance_used = M.onBalanceUsed
+
+-- Register with the framework. Load-order-safe: defers if the core isn't loaded.
+do
+	local function register()
+		if combat and combat.register then
+			combat.register(M)
+		end
+	end
+	if combat and combat.register then
+		register()
+	else
+		tempTimer(0, register)
+	end
+end
